@@ -87,12 +87,20 @@ CREDS:   All secrets (SSH, Web UI, Mongo) live in creds.json next to svcboard.py
 
 UPDATES: repo https://github.com/ramray/svcboard (private), branch main.
          PC:     Startup\vbs -> watchdog.ps1 -> git pull origin/main -> start (hidden).
-         Laptop: PC pushes to the laptop bare repo (remote 'lab',
-                 ssh://lab/C:/Users/roman/svcboard.git over the existing ssh key);
-                 laptop autostart -> watchdog-laptop.ps1 -> git pull of the local
-                 bare -> start svcboard.py --direct (hidden).
+         Laptop: PC pushes to the laptop bare repo (remote 'lab' =
+                 lab:C:/Users/roman/svcboard.git - scp-style form; the ssh://
+                 form does not resolve against the Windows sshd), then the
+                 laptop pulls that local bare - it never talks to github
+                 (corporate policy, ssh key via the PC only).
+                 Logon: Startup\vbs -> watchdog-laptop.ps1 -> git pull of the
+                 local bare -> start svcboard.py --direct (hidden).
+                 Remote/manual restart (no logon): scheduled task
+                 'svcboard-manual' runs the same watchdog -
+                 Start-ScheduledTask svcboard-manual. Needed when starting
+                 over ssh: children of an ssh session are killed with it.
          Release: on the PC - edit, commit, `git push origin main`, then
-                  `git push lab main`; the laptop picks it up at next logon.
+                  `git push lab main`; the laptop picks it up at next logon
+                  (or trigger the task above).
          Laptop pre-migration copy: C:\Users\roman\svcboard.bak-20261005.
 
 FILES:   svcboard.py            - the app (Python 3 + paramiko, stdlib HTTP)
