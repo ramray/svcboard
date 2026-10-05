@@ -9,6 +9,11 @@ $port = 49480
 $dir  = 'C:\Users\User\Documents\Default Project\svcboard'
 $py   = 'C:\Users\User\miniconda3\python.exe'
 
+# 0. Обновление из git (если это клон): тянем main, чтобы при старте стояла свежая версия
+if (Test-Path (Join-Path $dir '.git')) {
+    git -C $dir pull --ff-only *> "$env:TEMP\svcboard-pull.log"
+}
+
 # 1. Порт слушает — всё в порядке, выходим тихо
 if (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue) { exit 0 }
 
