@@ -98,6 +98,17 @@ UPDATES: repo https://github.com/ramray/svcboard (private), branch main.
                  'svcboard-manual' runs the same watchdog -
                  Start-ScheduledTask svcboard-manual. Needed when starting
                  over ssh: children of an ssh session are killed with it.
+                 Git safety: C:\Users\roman\svcboard and the bare
+                 C:\Users\roman\svcboard.git are owned by
+                 BUILTIN\Administrators, so the laptop user needs
+                 `git config --global --add safe.directory <path>` for both
+                 (set 2026-10-05; user.name/email of the corporate git
+                 untouched). Git matches the entry literally against the
+                 remote path - register the bare in the SAME slash form as
+                 the remote URL (the laptop has both C:/... and C:\...;
+                 remote origin uses the C:/ form). Without all this pull
+                 fails with "dubious ownership" in task/logon context -
+                 watch exit= in %TEMP%\svcboard-pull.log.
          Release: on the PC - edit, commit, `git push origin main`, then
                   `git push lab main`; the laptop picks it up at next logon
                   (or trigger the task above).
