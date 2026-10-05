@@ -1,0 +1,12 @@
+# secrets — всегда локально, никогда в git
+creds.json
+
+# runtime state of the app
+history.json
+tests-history.json
+svcboard.log
+*.out
+
+# python
+__pycache__/
+*.pyc
