@@ -7,9 +7,17 @@ Add-Content "$env:TEMP\svcboard-watchdog.log" "$(Get-Date -Format 'yyyy-MM-dd HH
 $dir = $PSScriptRoot
 $py  = 'C:\Python310\python.exe'
 
-# 0. Обновление из локального bare-репо (его пополняет ПК через ssh)
+# 0. Обновление из локального bare-репо (его пополняет ПК через ssh).
+# Вокруг git временно включаем EAP=Continue: при SilentlyContinue stderr git
+# (и его код возврата через перенаправление) проглатывается - лог был пустым.
+# Пустое значение exit= означает, что git не запустился вообще.
 if (Test-Path (Join-Path $dir '.git')) {
+    $eap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $LASTEXITCODE = $null
     git -C $dir pull --ff-only origin main *> "$env:TEMP\svcboard-pull.log"
+    ("exit=" + $LASTEXITCODE) | Out-File -Append "$env:TEMP\svcboard-pull.log"
+    $ErrorActionPreference = $eap
 }
 
 # 1. Порт слушает - выходим тихо
