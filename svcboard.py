@@ -118,6 +118,7 @@ LS_PORTS = {2351: "10.228.147.51", 2352: "10.228.147.61",
 # ТОЛЬКО чтение: никаких кнопок действий на этих карточках (бриф load-stands).
 LS_HOSTS = [
     {"label": "na-61", "ip": "10.228.147.61", "lport": 2352,
+     "extra": True,          # диск + I/O + кэш монги — как у na-62
      "role_hint": "MongoDB rs0", "units": ["mongod"]},
     {"label": "na-62", "ip": "10.228.147.62", "lport": 2353,
      "extra": True,          # диск + кэш монги — метрики только для этой карточки
@@ -346,12 +347,13 @@ def probe_load(cli, timeout=15):
         return None
 
 
-def probe_extra(cli, wt=False, timeout=12):
+def probe_extra(cli, wt=False, timeout=8):
     """Карточка na-62: диски (df -PT), I/O корня (дельта /proc/diskstats,
     как iostat — пакета sysstat на стенде нет) + кэш WiredTiger монги.
 
-    Только чтение; сбой не ломает карточку — вернёт пустые поля.
-    wt=True — только когда mongod активен.
+    Только чтение; таймауты малы (8 с) — висящий хост не должен ронять
+    карточку целиком, сбой вернёт пустые поля. wt=True — только когда
+    mongod активен.
     """
     res = {"disk": [], "io": None, "wt": None}
     rootfs = ""
@@ -386,7 +388,7 @@ def probe_extra(cli, wt=False, timeout=12):
                    "echo ---DA; cat /proc/diskstats; sleep 1; "
                    "echo U2=$(cut -d' ' -f1 /proc/uptime); "
                    "echo ---DB; cat /proc/diskstats") % rootfs
-            rc, out, err = run_cmd(cli, cmd, timeout=timeout + 5)
+            rc, out, err = run_cmd(cli, cmd, timeout=timeout + 4)
             dev, sec, t1, t2 = "", None, 0.0, 0.0
             snap = {"A": {}, "B": {}}
             for line in out.splitlines():
@@ -1432,6 +1434,8 @@ button.tab.on{background:#1e2740;border-color:#35405e;color:var(--tx)}
 .fid{color:#ff9ea3}
 .ferr{color:#c76b70;font-size:11px;white-space:pre-wrap;max-height:140px;overflow-y:auto}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px}
+#lgrid{grid-template-columns:repeat(auto-fill,minmax(360px,1fr))}
+@media (max-width:600px){#lgrid{grid-template-columns:repeat(auto-fill,minmax(300px,1fr))}}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
 .node{font-weight:600;font-size:13px;letter-spacing:.06em;color:#9fb0d0;margin-bottom:6px}
 .svc{display:flex;align-items:center;gap:10px;padding:9px 0;border-top:1px solid var(--line)}

@@ -163,6 +163,9 @@ const harness = `
       { label: "na-61", ip: "10.228.147.61", hint: "MongoDB rs0",
         ok: true, error: "", role: "PRIMARY",
         units: { "mongod": "active" },
+        extra: { disk: [{mount: "/", size_gb: 119.2, used_gb: 12.3, pct: 38}],
+                 wt: {used: 1073741824, max: 23622320128, pct: 4.5},
+                 io: {rs: 3.5, ws: 15.2, rmb: 0.4, wmb: 1.1, util: 6.8} },
         load: { l1: 0.86, l5: 0.99, l15: 0.96, cores: 24, cpu: 32.4,
                 mem_used: 5740, mem_total: 48162, mem_pct: 11.9 } },
       { label: "na-62", ip: "10.228.147.62", hint: "visordb-proxy → na-61",
@@ -216,8 +219,9 @@ const harness = `
       && card62.indexOf("5.4 МБ / 1.4 ГБ (0.4%)") >= 0);
   chk("62 disk io row", card62.indexOf("диск I/O") >= 0
       && card62.indexOf("r 12.3 / w 45.6 ops/s · 3.2 МБ/с · util 87.4%") >= 0);
-  chk("61 has no disk/cache/io rows", cardL.indexOf("кэш монги") < 0
-      && cardL.indexOf("диск I/O") < 0 && cardL.indexOf("/home") < 0);
+  chk("61 disk row rendered", cardL.indexOf("12.3 / 119.2 ГБ (38%)") >= 0);
+  chk("61 wt cache row", cardL.indexOf("1.0 ГБ / 22.0 ГБ (4.5%)") >= 0);
+  chk("61 disk io row", cardL.indexOf("r 3.5 / w 15.2 ops/s · 1.5 МБ/с · util 6.8%") >= 0);
   const card63 = lg.children[2].innerHTML;
   chk("63 off card shows reason", card63.indexOf("выключен (VMware") >= 0);
   chk("63 has no units section", card63.indexOf("Сервисы") < 0);
