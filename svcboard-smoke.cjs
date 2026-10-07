@@ -144,6 +144,72 @@ const harness = `
   chk("mongod failure still shown", cardM.indexOf("failed") >= 0);
   render(STATUS);
   chk("no FR when everything active", document.getElementById("grid").children[0].innerHTML.indexOf("reset-failed") < 0);
+  // ================= вкладка «Нагрузка» =================
+  setTab("load");
+  chk("load pane shown", document.getElementById("pane-load").style.display === "");
+  chk("board pane hidden on load", document.getElementById("pane-board").style.display === "none");
+  chk("tab-load active", document.getElementById("tab-load").className === "tab on",
+      document.getElementById("tab-load").className);
+  chk("tab-board inactive on load", document.getElementById("tab-board").className === "tab");
+  chk("empty state before fetch", document.getElementById("lgrid").innerHTML === "");
+  chk("lnote has hint", (document.getElementById("lnote").textContent || "").length > 0);
+  // подменяем fetch для /api/ls и рендерим карточки хостов стенда
+  const LSSTATUS = {
+    status: { ok: true, ycsb: "yes", ui: "up", gen63: "down",
+              targets: { direct: "up", proxy: "up" }, procs: [] },
+    run: { state: "idle" },
+    out: "",
+    metrics: { ts: "11:50:12", cards: [
+      { label: "na-61", ip: "10.228.147.61", hint: "MongoDB rs0",
+        ok: true, error: "", role: "PRIMARY",
+        units: { "mongod": "active" },
+        load: { l1: 0.86, l5: 0.99, l15: 0.96, cores: 24, cpu: 32.4,
+                mem_used: 5740, mem_total: 48162, mem_pct: 11.9 } },
+      { label: "na-62", ip: "10.228.147.62", hint: "visordb-proxy → na-61",
+        ok: true, error: "", role: null,
+        units: { "visordb-proxy": "active", "mongod": "active",
+                 "beholder": "failed" },
+        load: { l1: 0.11, l5: 0.12, l15: 0.09, cores: 4, cpu: 3.1,
+                mem_used: 1200, mem_total: 3965, mem_pct: 30.2 } },
+      { label: "na-63", ip: "10.228.147.63", hint: "два YCSB-генератора (выключен)",
+        ok: false, error: "выключен (VMware — поднимается из панели гипервизора)",
+        role: null, units: {}, load: null }
+    ]}
+  };
+  const realFetch = global.fetch;
+  global.fetch = (url) => Promise.resolve({
+    ok: true, json: async () => String(url).indexOf("/api/ls") >= 0 ? LSSTATUS : STATUS,
+    text: async () => ""
+  });
+  await fetchLs();
+  global.fetch = realFetch;
+  const lg = document.getElementById("lgrid");
+  chk("stand grid has 3 cards", lg.children.length === 3, lg.children.length);
+  const cardL = lg.children[0].innerHTML;
+  chk("card shows real stand host", cardL.indexOf("na-61") >= 0);
+  chk("card shows host ip", cardL.indexOf("10.228.147.61") >= 0);
+  chk("load value rendered", cardL.indexOf("0.86 / 0.99 / 0.96") >= 0);
+  chk("core count rendered", cardL.indexOf("24 cores") >= 0);
+  chk("cpu percent rendered", cardL.indexOf("32.4%") >= 0);
+  chk("mem rendered with GB", cardL.indexOf("5.6 ГБ / 47.0 ГБ") >= 0,
+      (cardL.match(/[0-9.]+ ГБ[^<]*/)||[""])[0]);
+  chk("load bar fill present", cardL.indexOf("lfill") >= 0);
+  chk("role [P] from card data", cardL.indexOf(">[P]<") >= 0);
+  chk("services block header", cardL.indexOf("Сервисы") >= 0);
+  chk("unit rendered", cardL.indexOf(">mongod<") >= 0);
+  chk("NO action buttons (read-only stand)", cardL.indexOf(">RS<") < 0
+      && cardL.indexOf(">GO<") < 0 && cardL.indexOf(">SP<") < 0);
+  const card62 = lg.children[1].innerHTML;
+  chk("62 units rendered", card62.indexOf(">beholder<") >= 0);
+  chk("failed unit visible", card62.indexOf("failed") >= 0);
+  const card63 = lg.children[2].innerHTML;
+  chk("63 off card shows reason", card63.indexOf("выключен (VMware") >= 0);
+  chk("63 has no units section", card63.indexOf("Сервисы") < 0);
+  chk("stand note timestamp", (document.getElementById("lnote").textContent || "").indexOf("11:50:12") >= 0);
+  chk("stand status line rendered",
+      (document.getElementById("lsStatus").innerHTML || "").indexOf("direct") >= 0);
+  setTab("board");
+  chk("back to board hides load", document.getElementById("pane-load").style.display === "none");
   console.log(fails.length === 0 ? "SMOKE_OK" : "SMOKE_FAIL count=" + fails.length);
   process.exit(fails.length);
 })().catch(e => { console.log("SMOKE_CRASH " + (e && e.stack || e)); process.exit(9); });

@@ -68,6 +68,54 @@ DR:      "DR-сценарий" buttons on the same "Тесты" tab (under the r
          GET /api/drout - verbatim tail. Output copy: ssh-lab\dr-easy.out.
          Refuses invalid mode/backup name without starting anything.
 
+LOAD:   Вкладка «Нагрузка» (третья, после «Тесты»): те же карточки нод и
+        сервисов, что на Доске, плюс метрики с каждой ноды:
+        - Load 1/5/15 + число ядер;
+        - CPU% — из дельты двух снимков /proc/stat (sleep 1 внутри команды);
+        - RAM used/total в ГБ и % (из /proc/meminfo, fallback на free -m).
+        Цвет бара по проценту: <70 зелёный, <90 жёлтый, иначе красный.
+        API: GET /api/load -> {ts, tunnel, nodes:[...,{load:{...}}]}.
+        Опрос отдельный от /api/status: история сюда НЕ пишется (её ведёт
+        get_status), чтобы дубли не портили uptime. Кнопки RS/GO/SP/FR на
+        карточках работают как на Доске. Роль реплики [P]/[S] берётся из
+        последнего /api/status — mongosh лишний раз не дёргается.
+        Обновление: раз в 15 с, только пока вкладка открыта (уход = стоп).
+        Dev-проверки: python check-js.py svcboard.py && node --check <файл>
+        и node svcboard-smoke.cjs svcboard.py (покрывает и вкладку «Нагрузка»).
+
+STAND:   Нагрузочный стенд (YCSB) — вкладка «Нагрузка», верх = карточки хостов,
+         низ = блок запуска YCSB.
+         Источник правды: load-stands\INSTRUCTION-NEW-SESSION.md и
+         load-stands\REPORT-inventory.md (оттуда дословно команды YCSB).
+         Карточки = РЕАЛЬНЫЕ хосты стенда (LS_HOSTS в коде), не флот:
+           na-61 10.228.147.61  mongod (rs0, target direct)
+           na-62 10.228.147.62  visordb-proxy, mongod, beholder (target proxy)
+           na-51 10.228.147.51  mongod, visordb-proxy, beholder + YCSB/Web UI
+           na-63 10.228.147.63  карточка-заглушка: выключен (VMware)
+         В каждой карточке: IP и роль хоста, юниты (systemctl is-active),
+         метрики (load 1/5/15, CPU%, RAM), роль реплики [P]/[S].
+         ТОЛЬКО чтение: кнопок RS/GO/SP на стенде НЕТ (бриф load-stands
+         запрещает менять/перезапускать). Опрос кэшируется 20 с (LS_CARDS_TTL).
+         Туннели: 2351->.51, 2352->.61, 2353->.62 через lab; поднимаются по
+         требованию одним ssh (только недостающие порты), в DIRECT не нужны.
+         API: GET /api/ls -> {status, run, out, metrics}; POST /api/ls
+         {action:'load'|'run', target:'direct'|'proxy', workload, threads,
+         records} либо {action:'stop'}.
+         Запуск: YCSB в foreground через SSH-канал, вывод построчно в
+         ЛОКАЛЬНЫЙ ssh-lab\ycsb-load.out (виден и после обрыва туннеля;
+         схема как у tests-runner.out/dr-easy.out). Таймаут 20 минут, по
+         нему же состояние -> done/error; summary берётся из [OVERALL]
+         RunTime/Throughput. Остановка: pkill 'bin/ycsb [l]oad|bin/ycsb [r]un'
+         (скобки [l]/[r] — чтобы pkill не убил собственную оболочку).
+         Статус (read-only, кэш 20 с): bin/ycsb, цели direct/proxy по nc,
+         Web UI :8080, ping .63, идущие процессы ycsb.
+         Белый список workload: workloada…f, tsworkloada; URI строится из
+         creds.json (mongo_user/mongo_pass), в логи не пишется.
+         ВАЖНО: обе кнопки требуют confirm() — клик есть явное согласие
+         на нагрузку и запись в базу ycsb (правило брифа load-stands).
+         Взаимоблокировка с автотестами/DR не ставилась: это другие хосты
+         (.61/.62 vs .22/.23/.24/.28), ресурсы не пересекаются.
+
 START:   start-svcboard.ps1     (double-click; no window appears; browser opens itself)
 STOP:    stop-svcboard.ps1
 STATUS:  start again while it runs = harmless (single-instance guard by port 49480).
@@ -79,6 +127,9 @@ PORTS:   49480  HTTP (127.0.0.1)
          2333-2336  SSH tunnel to 10.228.147.22/23/24/57 via host 'lab'
                      (separate from the slash-command tunnel 2222-2225, no clash;
                       a stale tunnel on 2333-2336 is killed automatically on start)
+         2351-2353  SSH tunnels to the load stand 10.228.147.51/61/62 via
+               'lab' (YCSB; own tunnels, spawned on demand by /api/ls, killed
+                by stop-svcboard.ps1; not touched by the status tunnel)
 
 CREDS:   All secrets (SSH, Web UI, Mongo) live in creds.json next to svcboard.py -
          gitignored, one copy per machine (template: creds.example.json).

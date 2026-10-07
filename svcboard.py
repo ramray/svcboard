@@ -13,6 +13,7 @@ import base64
 import json
 import os
 import re
+import shlex
 import socket
 import subprocess
 import sys
@@ -96,6 +97,51 @@ dr_ctl = threading.Lock()
 DR = {"state": "idle", "mode": None, "backup": None, "started": None,
       "started_ts": None, "ended": None, "rc": None, "error": "",
       "tunnels": ""}
+
+# ================= Нагрузочный стенд (load-stands) =================
+# YCSB живёт на 10.228.147.51 и шлёт в .61:27017 (direct) или
+# .62:27018 (proxy). С ПК хосты стенда достижимы только через ноут lab,
+# поэтому свой туннель 127.0.0.1:2351 -> .51:22 (2351 не занят: статус
+# держит 2333-2336, тесты 2222, DR 2242-2248).
+# Команды дословно из /opt/ST/stress-test/YCSB_SETUP.md (см. REPORT-inventory.md).
+LS_LPORT = 2351
+LS_SSH = "10.228.147.51"
+LS_HOME = "/opt/ST/ycsb-mongodb"
+# Вывод прогона пишется ЛОКАЛЬНО рядом с tests-runner.out / dr-easy.out:
+# так виден даже если SSH оборвался, и tail не требует отдельного подключения.
+LS_OUT = os.path.join(SSH_LAB, "ycsb-load.out")
+# Туннели стенда: порт -> хост (все через lab; в DIRECT-режиме не нужны).
+LS_PORTS = {2351: "10.228.147.51", 2352: "10.228.147.61",
+            2353: "10.228.147.62"}
+# Карточки вкладки — РЕАЛЬНЫЕ хосты стенда (load-stands), не флот na-22..57.
+# Юниты — по load-stands\REPORT-inventory.md (инвентаризация 04.10).
+# ТОЛЬКО чтение: никаких кнопок действий на этих карточках (бриф load-stands).
+LS_HOSTS = [
+    {"label": "na-61", "ip": "10.228.147.61", "lport": 2352,
+     "role_hint": "MongoDB rs0", "units": ["mongod"]},
+    {"label": "na-62", "ip": "10.228.147.62", "lport": 2353,
+     "role_hint": "visordb-proxy → na-61",
+     "units": ["visordb-proxy", "mongod", "beholder"]},
+    {"label": "na-51", "ip": "10.228.147.51", "lport": 2351,
+     "role_hint": "YCSB + Web UI :8080",
+     "units": ["mongod", "visordb-proxy", "beholder"]},
+    # .63 выключен (VMware) — карточка-заглушка, без SSH.
+    {"label": "na-63", "ip": "10.228.147.63", "lport": None, "off": True,
+     "role_hint": "два YCSB-генератора (выключен)", "units": []},
+]
+# цель -> host:port, куда шлётся mongodb.url
+LS_TARGETS = {"direct": "10.228.147.61:27017", "proxy": "10.228.147.62:27018"}
+LS_WORKLOADS = ("workloada", "workloadb", "workloadc", "workloadd",
+                "workloade", "workloadf", "tsworkloada")
+# [l]/[r] — чтобы pgrep/pkill не убили собственную оболочку (см. ls_running)
+LS_PROC_RE = "bin/ycsb [l]oad|bin/ycsb [r]un"
+ls_ctl = threading.Lock()
+LS = {"state": "idle", "mode": None, "target": None, "workload": None,
+      "threads": 4, "records": 10000, "started": None, "started_ts": None,
+      "ended": None, "summary": "", "error": ""}
+ls_tun_ctl = threading.Lock()
+ls_tunnel_proc = None
+_ls_status_cache = {"ts": 0.0, "data": None}
 
 
 def log(msg):
@@ -246,6 +292,59 @@ def check_node(n):
     return res
 
 
+def _cpu_busy(a, b):
+    """CPU%% из двух снимков строки `cpu` /proc/stat (дельта за sleep 1)."""
+    try:
+        fa = [int(x) for x in a.split()[1:9]]
+        fb = [int(x) for x in b.split()[1:9]]
+        if len(fa) < 5 or len(fb) < 5:
+            return None
+        dt = sum(fb) - sum(fa)
+        if dt <= 0:
+            return None
+        di = (fb[3] + fb[4]) - (fa[3] + fa[4])   # idle + iowait
+        return round(max(0.0, min(100.0, (1.0 - di / float(dt)) * 100.0)), 1)
+    except Exception:
+        return None
+
+
+def probe_load(cli, timeout=15):
+    """Read-only: load average, CPU%% за последнюю секунду, память.
+
+    Одна команда на всё (sleep 1 внутри нужен для дельты /proc/stat).
+    Возвращает dict либо None; сбой нагрузки НЕ должен ломать статус ноды.
+    """
+    cmd = ("echo L=$(cut -d' ' -f1-3 /proc/loadavg); "
+           "echo N=$(nproc); "
+           "A=$(grep '^cpu ' /proc/stat); sleep 1; B=$(grep '^cpu ' /proc/stat); "
+           "echo A=$A; echo B=$B; "
+           "free -m | awk '/^Mem:/{av=($7==\"\"?$4:$7); "
+           "print \"M=\" $3 \",\" $2 \",\" av}'")
+    try:
+        rc, out, err = run_cmd(cli, cmd, timeout=timeout)
+        d = {}
+        for line in out.splitlines():
+            if "=" in line:
+                k, _, v = line.partition("=")
+                d[k.strip()] = v.strip()
+        l = d.get("L", "").split()
+        m = d.get("M", "").split(",")
+        if len(l) < 3 or len(m) < 3:
+            return None
+        used, total, avail = int(m[0]), int(m[1]), int(m[2])
+        cores = int(d.get("N") or 0)
+        if not cores or not total:
+            return None
+        pct = (total - avail) * 100.0 / total if total else 0.0
+        return {"l1": float(l[0]), "l5": float(l[1]), "l15": float(l[2]),
+                "cores": cores,
+                "cpu": _cpu_busy(d.get("A", ""), d.get("B", "")),
+                "mem_used": used, "mem_total": total,
+                "mem_pct": round(pct, 1)}
+    except Exception:
+        return None
+
+
 def probe_all():
     results = [None] * len(NODES)
 
@@ -277,6 +376,374 @@ def get_status():
             "nodes": results}
 
 
+# ================= Нагрузочный стенд: туннель и SSH =================
+
+def ensure_ls_tunnel():
+    """Туннели стенда 2351-2353 -> .51/.61/.62:22 через lab.
+
+    Не трогает статус-туннель 2333-2336 и тестовый 2222. Поднимает только
+    недостающие порты (уже поднятые переиспользует — как у DR).
+    В DIRECT-режиме (ноут) туннели не нужны: хосты достижимы напрямую.
+    """
+    global ls_tunnel_proc
+    if DIRECT:
+        return True
+    need = [p for p in LS_PORTS if not port_listening(p)]
+    if not need:
+        return True
+    with ls_tun_ctl:
+        need = [p for p in LS_PORTS if not port_listening(p)]
+        if not need:
+            return True
+        args = ["ssh", "-N", "-o", "ExitOnForwardFailure=yes",
+                "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3"]
+        for p in need:
+            args += ["-L", "127.0.0.1:%d:%s:22" % (p, LS_PORTS[p])]
+        args += [TUNNEL_HOST]
+        try:
+            ls_tunnel_proc = subprocess.Popen(args, creationflags=CREATE_NO_WINDOW)
+        except Exception as e:
+            log("ls tunnel spawn FAIL: %r" % e)
+            return False
+        for _ in range(15):
+            time.sleep(1)
+            if ls_tunnel_proc.poll() is not None:
+                log("ls tunnel died rc=%s" % ls_tunnel_proc.returncode)
+                return False
+            if all(port_listening(p) for p in need):
+                log("ls tunnel up pid=%d ports=%s" % (ls_tunnel_proc.pid, need))
+                return True
+        return all(port_listening(p) for p in need)
+
+
+def ls_connect(lport=None, timeout=20):
+    """SSH на хост стенда. lport=None -> .51 (порт 2351)."""
+    lp = LS_LPORT if lport is None else lport
+    if not ensure_ls_tunnel():
+        raise RuntimeError("нет туннеля до стенда (порт %d)" % lp)
+    target = LS_PORTS[lp] if DIRECT else lp
+    cli = paramiko.SSHClient()
+    cli.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    host = target if isinstance(target, str) else "127.0.0.1"
+    port = 22 if isinstance(target, str) else target
+    cli.connect(host, port=port, username=SSH_USER, password=SSH_PASS,
+                look_for_keys=False, allow_agent=False,
+                timeout=timeout, banner_timeout=timeout, auth_timeout=timeout)
+    return cli
+
+
+def ls_run(cmd, timeout=30, lport=None):
+    """Одна команда на хост стенда: (rc, stdout, stderr). Соединение закрывается."""
+    cli = ls_connect(lport)
+    try:
+        return run_cmd(cli, cmd, timeout=timeout)
+    finally:
+        cli.close()
+
+
+# ================= Нагрузочный стенд: статус (read-only) =================
+
+def ls_status(force=False):
+    """Доступность целей и наличие YCSB — только чтение, кэш 20 с."""
+    now = time.time()
+    if not force and _ls_status_cache["data"] and now - _ls_status_cache["ts"] < 20:
+        return _ls_status_cache["data"]
+    out = {"ok": False, "error": "", "ycsb": "", "targets": {},
+           "gen63": "?", "procs": [], "ui": "?"}
+    # Стрелки НЕ нужны: bash даёт /dev/tcp и nc; проверяем через nc (есть на .51)
+    cmd = ("echo YCSB=$(test -x %s/bin/ycsb && echo yes || echo no); "
+           "echo UI=$(nc -z -w2 10.228.147.51 8080 && echo up || echo down); "
+           "echo T_direct=$(nc -z -w3 10.228.147.61 27017 && echo up || echo down); "
+           "echo T_proxy=$(nc -z -w3 10.228.147.62 27018 && echo up || echo down); "
+           "echo G63=$(ping -c1 -W1 -q 10.228.147.63 >/dev/null 2>&1 && echo up || echo down); "
+           "pgrep -af 'bin/ycsb [l]oad|bin/ycsb [r]un' | head -3"
+           ) % LS_HOME
+    try:
+        rc, o, e = ls_run(cmd, timeout=30)
+        out["ok"] = True
+        for line in o.splitlines():
+            if line.startswith("YCSB="):
+                out["ycsb"] = line.partition("=")[2]
+            elif line.startswith("UI="):
+                out["ui"] = line.partition("=")[2]
+            elif line.startswith("T_"):
+                k, _, v = line.partition("=")
+                out["targets"][k[2:]] = v
+            elif line.startswith("G63="):
+                out["gen63"] = line.partition("=")[2]
+            elif "bin/ycsb" in line:
+                out["procs"].append(line.strip())
+    except Exception as e:
+        out["error"] = repr(e)
+    _ls_status_cache.update(ts=now, data=out)
+    return out
+
+
+# ================= Нагрузочный стенд: карточки хостов =================
+
+_ls_cards_cache = {"ts": 0.0, "data": None}
+LS_CARDS_TTL = 20          # сек: не дёргаем SSH на каждый тик фронта
+
+
+def ls_card(h):
+    """Карточка одного хоста стенда: юниты + метрики. Только чтение."""
+    card = {"label": h["label"], "ip": h["ip"], "hint": h.get("role_hint", ""),
+            "ok": False, "error": "", "units": {}, "role": None, "load": None}
+    if h.get("off"):
+        card["error"] = "выключен (VMware — поднимается из панели гипервизора)"
+        return card
+    try:
+        cli = ls_connect(h["lport"])
+    except Exception as e:
+        card["error"] = repr(e)
+        return card
+    try:
+        units = h.get("units") or []
+        if units:
+            chk = 'for u in %s; do echo "$u=$(systemctl is-active $u)"; done' \
+                  % " ".join(units)
+            rc, out, err = run_cmd(cli, chk, timeout=15)
+            states = {}
+            for line in out.splitlines():
+                if "=" in line:
+                    k, _, v = line.partition("=")
+                    states[k.strip().replace(".service", "")] = v.strip()
+            missing = [u for u in units if u not in states]
+            if missing and not states:
+                card["error"] = (err.strip() or out.strip() or "no output")[:300]
+            elif missing:
+                card["error"] = "missing states: " + ", ".join(missing)
+            card["units"] = states
+            card["ok"] = not missing
+            if states.get("mongod") == "active":
+                card["role"] = probe_role(cli)     # rs0: PRIMARY/SECONDARY
+        card["load"] = probe_load(cli)             # sleep 1 внутри — по 1 с/хост
+        if not card["units"] and card["load"]:
+            card["ok"] = True      # юнитов нет (не наш случай) — метрики есть
+    except Exception as e:
+        card["error"] = repr(e)
+    finally:
+        cli.close()
+    return card
+
+
+def ls_cards(force=False):
+    """Карточки всех хостов стенда параллельно; кэш LS_CARDS_TTL сек."""
+    now = time.time()
+    if not force and _ls_cards_cache["data"] \
+            and now - _ls_cards_cache["ts"] < LS_CARDS_TTL:
+        return _ls_cards_cache["data"]
+    results = [None] * len(LS_HOSTS)
+
+    def worker(i, h):
+        results[i] = ls_card(h)
+
+    threads = [threading.Thread(target=worker, args=(i, h))
+               for i, h in enumerate(LS_HOSTS)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    cards = [r if r is not None else
+             {"label": h["label"], "ip": h["ip"], "hint": h.get("role_hint", ""),
+              "ok": False, "error": "probe timeout", "units": {},
+              "role": None, "load": None}
+             for r, h in zip(results, LS_HOSTS)]
+    data = {"ts": time.strftime("%H:%M:%S"), "cards": cards}
+    _ls_cards_cache.update(ts=now, data=data)
+    return data
+
+
+# ================= Нагрузочный стенд: запуск =================
+
+def ls_snapshot():
+    d = dict(LS)
+    if d.get("started_ts") and d["state"] in ("running", "starting"):
+        d["elapsed_s"] = int(time.time() - d["started_ts"])
+    return d
+
+
+def ls_tail(lines=80):
+    """Хвост ЛОКАЛЬНОГО лога прогона (читается без SSH — виден всегда)."""
+    try:
+        if not os.path.exists(LS_OUT):
+            return ""
+        with open(LS_OUT, "r", encoding="utf-8", errors="replace") as f:
+            data = f.read()
+        parts = data.splitlines()
+        return "\n".join(parts[-lines:])
+    except Exception as e:
+        return "--- лог недоступен: %r ---" % e
+
+
+def ls_start(mode, target, workload, threads, records):
+    if mode not in ("load", "run"):
+        return {"ok": False, "error": "режим: load|run"}
+    if target not in LS_TARGETS:
+        return {"ok": False, "error": "цель: direct|proxy"}
+    if workload not in LS_WORKLOADS:
+        return {"ok": False, "error": "workload не в белом списке"}
+    try:
+        threads = max(1, min(128, int(threads)))
+        records = max(1, int(records))
+    except Exception:
+        return {"ok": False, "error": "threads/records — числа"}
+    with ls_ctl:
+        if LS["state"] in ("starting", "running"):
+            return {"ok": False, "error": "нагрузка уже выполняется"}
+        LS.update({"state": "starting", "mode": mode, "target": target,
+                   "workload": workload, "threads": threads, "records": records,
+                   "started": time.strftime("%H:%M:%S"),
+                   "started_ts": time.time(), "ended": None,
+                   "summary": "", "error": ""})
+    log("LS start: %s %s %s threads=%d records=%d"
+        % (mode, target, workload, threads, records))
+    threading.Thread(target=_ls_worker,
+                     args=(mode, target, workload, threads, records),
+                     daemon=True).start()
+    return {"ok": True}
+
+
+def _ls_worker(mode, target, workload, threads, records):
+    """YCSB на .51 в foreground; stdout+stderr -> локальный LS_OUT (построчно).
+
+    Схема как у tests/dr: одно SSH-соединение, вывод виден в реальном времени
+    и переживает обрыв туннеля (файл локальный). Таймаут 20 минут.
+    """
+    uri = "mongodb://%s:%s@%s/ycsb?authSource=admin&w=1" % (
+        CREDS["mongo_user"], CREDS["mongo_pass"], LS_TARGETS[target])
+    # Дословно из YCSB_SETUP.md; -P абсолютным, чтобы не зависеть от cwd.
+    cmd = "%s/bin/ycsb %s mongodb -s -P %s/workloads/%s -threads %d " \
+          "-p %s -p mongodb.database=ycsb -p table=usertable " \
+          "-p recordcount=%d" % (LS_HOME, mode, LS_HOME, workload,
+                                 threads, shlex.quote("mongodb.url=" + uri),
+                                 records)
+    if mode == "run":
+        cmd += " -p operationcount=%d" % records
+
+    cli = None
+    try:
+        cli = ls_connect()
+        si, so, se = cli.exec_command("cd %s && %s" % (LS_HOME, cmd),
+                                      timeout=1200)
+        chan = so.channel
+        chan.settimeout(1.0)
+        with open(LS_OUT, "w", encoding="utf-8", errors="replace") as fo:
+            fo.write("$ %s\n\n" % cmd)
+            fo.flush()
+            with ls_ctl:
+                LS["state"] = "running"
+            deadline = time.time() + 1200     # 20 минут — жёсткий потолок
+            buf = bytearray()
+            while True:
+                if chan.recv_ready():
+                    chunk = chan.recv(65536)
+                    if not chunk:
+                        break
+                    buf.extend(chunk)
+                    fo.write(chunk.decode("utf-8", "replace"))
+                    fo.flush()
+                elif chan.recv_stderr_ready():
+                    chunk = chan.stderr.recv(65536)
+                    if not chunk:
+                        break
+                    buf.extend(chunk)
+                    fo.write(chunk.decode("utf-8", "replace"))
+                    fo.flush()
+                elif chan.exit_status_ready():
+                    # дочитать остаток
+                    while chan.recv_ready():
+                        c2 = chan.recv(65536)
+                        if not c2:
+                            break
+                        fo.write(c2.decode("utf-8", "replace"))
+                    while chan.recv_stderr_ready():
+                        c2 = chan.stderr.recv(65536)
+                        if not c2:
+                            break
+                        fo.write(c2.decode("utf-8", "replace"))
+                    break
+                else:
+                    time.sleep(0.4)
+                if time.time() > deadline:
+                    with ls_ctl:
+                        LS.update({"state": "error",
+                                   "ended": time.strftime("%H:%M:%S"),
+                                   "error": "таймаут 20 минут — прогон прерван"})
+                    log("LS worker: timeout 20min")
+                    try:
+                        chan.send(b"\x03")     # Ctrl-C удалённой стороне
+                    except Exception:
+                        pass
+                    return
+            rc = chan.recv_exit_status()
+        text = buf.decode("utf-8", "replace")
+        summary = _ls_summary(text)
+        with ls_ctl:
+            LS.update({"state": "done", "ended": time.strftime("%H:%M:%S"),
+                       "summary": summary,
+                       "error": "" if rc == 0 else ("YCSB rc=%s" % rc)})
+        log("LS done: rc=%s %s" % (rc, summary))
+    except Exception as ex:
+        with ls_ctl:
+            LS.update({"state": "error", "ended": time.strftime("%H:%M:%S"),
+                       "error": repr(ex)})
+        log("LS worker FAIL: %r" % ex)
+    finally:
+        if cli is not None:
+            try:
+                cli.close()
+            except Exception:
+                pass
+
+
+def _ls_summary(text):
+    """[[OVERALL], RunTime(ms), X] и Throughput из финального хвоста."""
+    out = []
+    for key in ("RunTime(ms)", "Throughput(ops/sec)"):
+        m = re.search(r"\[OVERALL\], %s, ([\d.eE+-]+)"
+                      % re.escape(key), text)
+        if m:
+            out.append("%s=%s" % (key.split("(")[0], m.group(1)))
+    return ", ".join(out)
+
+
+def ls_stop():
+    with ls_ctl:
+        if LS["state"] not in ("starting", "running"):
+            return {"ok": False, "error": "нагрузка не запущена"}
+        LS["state"] = "stopping"
+    log("LS stop requested")
+    threading.Thread(target=_ls_stop_worker, daemon=True).start()
+    return {"ok": True}
+
+
+def _ls_stop_worker():
+    try:
+        # pkill по маске процесса; [l]/[r] — чтобы не убить собственную оболочку
+        rc, o, e = ls_run(
+            "pkill -f 'bin/ycsb [l]oad|bin/ycsb [r]un' 2>/dev/null; sleep 1; "
+            "echo LEFT=$(pgrep -cf 'bin/ycsb [l]oad|bin/ycsb [r]un' || true)",
+            timeout=30)
+        left = o.strip()
+        # воркер сам перейдёт в done/error по recv_exit_status — ждём до 15 с
+        for _ in range(15):
+            time.sleep(1)
+            with ls_ctl:
+                if LS["state"] not in ("stopping", "running"):
+                    break
+        with ls_ctl:
+            if LS["state"] in ("stopping", "running"):
+                LS.update({"state": "done", "ended": time.strftime("%H:%M:%S"),
+                           "summary": "остановлено вручную", "error": ""})
+        log("LS stopped (%s)" % left.replace("\n", " "))
+    except Exception as ex:
+        with ls_ctl:
+            LS.update({"state": "error", "ended": time.strftime("%H:%M:%S"),
+                       "error": repr(ex)})
+        log("LS stop FAIL: %r" % ex)
+
+
 ACTIONS = ("restart", "start", "stop", "reset-failed")
 # terminal state that counts as success for each action
 EXPECTED = {"restart": "active", "start": "active", "stop": "inactive",
@@ -289,14 +756,32 @@ def do_action(label, unit, action):
         return {"ok": False, "error": "another action in progress"}
     try:
         n = BY_LABEL.get(label)
-        if n is None or unit not in n["units"]:
+        stand = None
+        if n is None:
+            # хост стенда (вкладка «Нагрузка») — свой туннель, свои юниты
+            stand = next((h for h in LS_HOSTS if h["label"] == label), None)
+            if stand is None or stand.get("off") \
+                    or unit not in (stand.get("units") or []):
+                return {"ok": False, "error": "unknown target"}
+            with ls_ctl:
+                if LS["state"] in ("starting", "running", "stopping"):
+                    return {"ok": False,
+                            "error": "идёт прогон YCSB — действия на стенде "
+                                     "заблокированы до его конца"}
+        elif unit not in n["units"]:
             return {"ok": False, "error": "unknown target"}
         if action not in ACTIONS:
             return {"ok": False, "error": "unknown action"}
-        if not ensure_tunnel():
-            return {"ok": False, "error": "tunnel down"}
+        if stand is None:
+            if not ensure_tunnel():
+                return {"ok": False, "error": "tunnel down"}
+        elif not ensure_ls_tunnel():
+            return {"ok": False, "error": "стенд-туннель (2351-2353) не поднялся"}
         try:
-            cli = ssh_connect(n["ip"] if DIRECT else n["lport"], timeout=10)
+            if stand is None:
+                cli = ssh_connect(n["ip"] if DIRECT else n["lport"], timeout=10)
+            else:
+                cli = ls_connect(stand["lport"], timeout=10)
         except Exception as e:
             return {"ok": False, "error": "connect: %r" % e}
         try:
@@ -320,8 +805,12 @@ def do_action(label, unit, action):
             r, st, _e = run_cmd(
                 cli, "systemctl status --no-pager -l -n 8 %s" % unit, timeout=15)
             ok = (rc == 0 and post == want)
-            log("ACTION %s %s/%s -> ok=%s rc=%d pre=%s post=%s %.1fs"
-                % (action, label, unit, ok, rc, pre, post, took))
+            log("ACTION %s %s/%s%s -> ok=%s rc=%d pre=%s post=%s %.1fs"
+                % (action, label, unit, " [stand]" if stand else "",
+                   ok, rc, pre, post, took))
+            if stand:
+                # карточка должна сразу показать новое состояние
+                _ls_cards_cache.update(ts=0.0, data=None)
             return {"ok": ok, "action": action, "pre": pre, "post": post,
                     "rc": rc, "took_s": took, "stderr": err.strip(),
                     "stdout": out.strip(), "status": st.strip()}
@@ -866,6 +1355,43 @@ button.danger:hover{background:#3a2026}
 .sbadge{background:#1e2740;border:1px solid #2b3554;color:#8b93a7;border-radius:6px;padding:1px 7px;font-size:11px;margin-left:8px;vertical-align:middle}
 .rbadge{background:#3a2a10;border:1px solid #7a5a1a;color:#f5a623;border-radius:6px;padding:1px 7px;font-size:11px;margin-left:8px;vertical-align:middle}
 .primsum{margin-left:auto;font-size:12.5px;color:var(--dim)}
+/* --- вкладка «Нагрузка» --- */
+.lsec{margin-top:10px;padding-top:8px;border-top:1px dashed var(--line);display:flex;flex-direction:column;gap:7px}
+.lrow{display:flex;align-items:baseline;gap:8px;font-size:12.5px}
+.llab{color:var(--dim);width:74px;flex:none}
+.lnum{font-family:ui-monospace,Consolas,monospace;font-size:13px;color:var(--tx);letter-spacing:.02em}
+.lcores{color:#5c6580;font-size:11px;margin-left:auto}
+.lwide{flex:1;min-width:0}
+.lbar{height:7px;border-radius:4px;background:#101522;border:1px solid var(--line);overflow:hidden}
+.lfill{height:100%;border-radius:4px;background:#2ecc40;transition:width .4s}
+.lfill.warn{background:#f5a623}
+.lfill.bad{background:#ff4d4f}
+.lval{font-size:11.5px;color:var(--dim);margin-top:2px;text-align:right;font-family:ui-monospace,Consolas,monospace}
+.lval.lmiss{color:#5c6580}
+.lhead{margin-top:10px;font-size:11px;letter-spacing:.08em;color:#5c6580;text-transform:uppercase}
+.lsub{font-size:11.5px;color:#5c6580;margin:-2px 0 4px;font-family:ui-monospace,Consolas,monospace}
+.lnote{margin-top:10px;color:#5c6580;font-size:12px}
+/* --- стенд нагрузки (YCSB) --- */
+/* .lsbox наследует flex от .tbox — оттуда статус сжимался и рвался построчно.
+   display:block + nowrap: подпись и статус живут в одной строке. */
+.lsbox{margin-top:16px;padding:12px 14px;background:var(--card);border:1px solid var(--line);border-radius:12px;display:block;white-space:nowrap;overflow-x:auto}
+.lsbox .drlabel{display:inline;margin-right:12px}
+#lsStatus{display:inline;white-space:nowrap}
+.lsctl{margin-top:10px;gap:10px}
+.lsstat{font-size:12.5px;color:var(--dim)}
+.lsstat b{color:#9fb0d0;font-weight:600}
+.lsstat .up{color:#7ee2a8}
+.lsstat .down{color:#ff9ea3}
+.lsctl select{background:#1a2136;color:var(--tx);border:1px solid #35405e;border-radius:8px;padding:6px 9px;font-size:12.5px}
+.lsctl select:disabled{opacity:.5}
+.lsnum{color:var(--dim);font-size:12.5px;display:flex;align-items:center;gap:6px}
+.lsnum input{width:74px;background:#1a2136;color:var(--tx);border:1px solid #35405e;border-radius:8px;padding:5px 8px;font-size:12.5px;font-family:ui-monospace,Consolas,monospace}
+.lsnum input:disabled{opacity:.5}
+#lsState{font-size:12.5px;color:var(--dim)}
+#lsState.ok{color:#7ee2a8}
+#lsState.warn{color:#f5a623}
+#lsState.bad{color:#ff9ea3}
+#lsout{display:none;margin:10px 0 0;padding:10px 14px;background:var(--card);border:1px solid var(--line);border-radius:10px;font-size:12px;color:#9fb0d0;white-space:pre-wrap;overflow-x:auto;max-height:340px;overflow-y:auto;font-family:ui-monospace,Consolas,monospace}
 footer{margin-top:16px;color:#5c6580;font-size:12px;display:flex;gap:14px;align-items:center}
 </style>
 </head>
@@ -876,6 +1402,7 @@ footer{margin-top:16px;color:#5c6580;font-size:12px;display:flex;gap:14px;align-
 <nav id="tabs">
 <button class="tab on" id="tab-board" onclick="setTab('board')">Доска</button>
 <button class="tab" id="tab-tests" onclick="setTab('tests')">Тесты<span id="tabfail"></span></button>
+<button class="tab" id="tab-load" onclick="setTab('load')">Нагрузка</button>
 </nav>
 </div>
 <span id="primsum" class="primsum"></span>
@@ -900,6 +1427,37 @@ footer{margin-top:16px;color:#5c6580;font-size:12px;display:flex;gap:14px;align-
   <div class="hhead"><span>Результаты прогонов</span><span class="hstart" id="runsn"></span></div>
   <div class="runs" id="runs"><span class="empty">загрузка…</span></div>
 </div>
+</div>
+<div id="pane-load" style="display:none">
+<div class="grid" id="lgrid"></div>
+<div class="lnote" id="lnote">откройте вкладку — метрики опросятся автоматически</div>
+
+<div class="tbox tbox-top lsbox" id="lsbox" style="margin-top:16px">
+  <span class="drlabel">Нагрузочный стенд (YCSB → .51):</span>
+  <span id="lsStatus" class="lsstat">проверка…</span>
+</div>
+<div class="tbox lsctl">
+  <select id="lsMode" title="режим">
+    <option value="load">load (загрузка данных)</option>
+    <option value="run">run (транзакции)</option>
+  </select>
+  <select id="lsTarget" title="куда шлём нагрузку">
+    <option value="direct">direct → 10.228.147.61:27017</option>
+    <option value="proxy">proxy → 10.228.147.62:27018</option>
+  </select>
+  <select id="lsWl" title="workload (из workloads/)">
+    <option>workloada</option><option>workloadb</option>
+    <option>workloadc</option><option>workloadd</option>
+    <option>workloade</option><option>workloadf</option>
+    <option>tsworkloada</option>
+  </select>
+  <label class="lsnum">threads<input id="lsThr" type="number" min="1" max="128" value="4"></label>
+  <label class="lsnum">records<input id="lsRec" type="number" min="1" value="10000"></label>
+  <button id="lsStart" class="tbtn" onclick="lsStart()">▶ Запустить</button>
+  <button id="lsStop" class="dbtn" onclick="lsStop()" disabled>■ Стоп</button>
+  <span id="lsState"></span>
+</div>
+<pre id="lsout"></pre>
 </div>
 <footer><span id="ts">загрузка…</span><button onclick="load()">Обновить</button><span id="lan">__LAN__</span></footer>
 <script>
@@ -1027,10 +1585,205 @@ function renderHistory(h){
 function setTab(t){
   document.getElementById('pane-board').style.display=(t==='board')?'':'none';
   document.getElementById('pane-tests').style.display=(t==='tests')?'':'none';
+  document.getElementById('pane-load').style.display=(t==='load')?'':'none';
   document.getElementById('tab-board').className='tab'+(t==='board'?' on':'');
   document.getElementById('tab-tests').className='tab'+(t==='tests'?' on':'');
+  document.getElementById('tab-load').className='tab'+(t==='load'?' on':'');
   if(t==='tests')fetchRuns();
+  if(t==='load'){renderLoad();fetchLs();} else stopLoadPolling();
+  // «Mongo primary: na-22» — про флот, на вкладке стенда он неуместен
+  const ps=document.getElementById('primsum');
+  if(ps)ps.style.display=(t==='load')?'none':'';
 }
+
+// ===================== Вкладка «Нагрузка» =====================
+// Карточки = РЕАЛЬНЫЕ хосты стенда (na-61/62/51/63), не флот na-22..57:
+// статусы юнитов + метрики (load/CPU/RAM) приходят одним опросом /api/ls
+// (см. LS_HOSTS в бэкенде; источник — load-stands\REPORT-inventory.md).
+// Только чтение: кнопок действий на этих карточках НЕТ (бриф load-stands).
+// Роль реплики [P]/[S] приходит в карточке с сервера.
+let LS = null, lsTick = null;
+const LS_IDLE_MS = 15000;   // пока ничего не запущено
+const LS_RUN_MS = 5000;     // идёт YCSB — следим за логом чаще
+
+async function fetchLs(){
+  try{
+    const r = await fetch('/api/ls',{cache:'no-store'});
+    LS = await r.json();
+    renderLs();
+    renderLoad();
+  }catch(e){
+    const s=document.getElementById('lsStatus');
+    if(s)s.textContent='нет связи со стендом: '+e;
+  }
+  scheduleLsTick();
+}
+/** Частота опроса: быстрее, пока идёт прогон. */
+function scheduleLsTick(){
+  if(lsTick){clearInterval(lsTick);lsTick=null;}
+  const r = LS && LS.run;
+  const running = r && (r.state==='running'||r.state==='starting'||r.state==='stopping');
+  lsTick = setInterval(fetchLs, running?LS_RUN_MS:LS_IDLE_MS);
+}
+function stopLoadPolling(){ if(lsTick){clearInterval(lsTick);lsTick=null;} }
+
+// ===================== Стенд: кнопки запуска (YCSB) =====================
+// POST /api/ls {action:'load'|'run'|'stop',...}.
+// Запуск = явное согласие: confirm() перед каждым POST (как у кнопок Доски).
+
+function lsUp(v){ return v==='up'||v==='yes' ? '<span class="up">'+esc(v)+'</span>'
+                                             : '<span class="down">'+esc(v||'?')+'</span>'; }
+
+function renderLs(){
+  const s=document.getElementById('lsStatus');
+  if(!s||!LS)return;
+  const st=LS.status||{};
+  if(!st.ok){
+    s.innerHTML='статус недоступен: '+esc(st.error||'нет туннеля/связи');
+  }else{
+    const t=st.targets||{};
+    s.innerHTML='цели: direct '+lsUp(t.direct)+' · proxy '+lsUp(t.proxy)
+      +' · UI('+lsUp(st.ui)+') · gen .63 '+lsUp(st.gen63)
+      +' · ycsb '+lsUp(st.ycsb)
+      +(st.procs&&st.procs.length?' · <b>идёт: '+st.procs.length+' проц.</b>':'');
+  }
+  const run=LS.run||{}, state=run.state||'idle';
+  const btnS=document.getElementById('lsStart'), btnP=document.getElementById('lsStop');
+  const busy=(state==='running'||state==='starting'||state==='stopping');
+  const locks=['lsMode','lsTarget','lsWl','lsThr','lsRec'].map(id=>document.getElementById(id)).filter(Boolean);
+  locks.forEach(el=>el.disabled=busy);
+  if(btnS)btnS.disabled=busy;
+  if(btnP)btnP.disabled=!busy;
+
+  const el=document.getElementById('lsState');
+  if(el){
+    if(state==='idle'){el.textContent='не запущено';el.className='';}
+    else if(state==='starting'){el.textContent='запуск…';el.className='warn';}
+    else if(state==='running'){
+      const e=(run.elapsed_s!=null)?(' · '+run.elapsed_s+' с'):'';
+      el.textContent=(run.mode||'')+' → '+(run.target||'')+' ('+(run.workload||'')
+        +', '+run.threads+' thr, '+run.records+')'+e;el.className='warn';}
+    else if(state==='stopping'){el.textContent='останавливаю…';el.className='warn';}
+    else if(state==='done'){el.textContent='готово'+(run.summary?(' · '+run.summary):'')
+      +(run.error?(' · '+run.error):'');el.className=run.error?'bad':'ok';}
+    else if(state==='error'){el.textContent='ошибка: '+(run.error||'?');el.className='bad';}
+  }
+  // вывод YCSB
+  const out=document.getElementById('lsout');
+  if(out){
+    const txt=LS.out||'';
+    if(txt.trim()){out.style.display='';out.textContent=txt;}
+    else if(state!=='idle'){out.style.display='';out.textContent='(вывода пока нет)';}
+    else out.style.display='none';
+  }
+}
+
+async function lsStart(){
+  const mode=document.getElementById('lsMode').value;
+  const target=document.getElementById('lsTarget').value;
+  const wl=document.getElementById('lsWl').value;
+  const thr=document.getElementById('lsThr').value;
+  const rec=document.getElementById('lsRec').value;
+  const where=(target==='direct')?'напрямую в 10.228.147.61:27017'
+                                 :'через proxy 10.228.147.62:27018';
+  if(!confirm('Запустить YCSB «'+mode+'» ('+wl+', '+thr+' threads, '
+      +rec+' records)\n'+where+'?\n\nКлик = явное согласие на НАГРУЗКУ '
+      +'на тестовом стенде: данные будут записаны в базу ycsb.'))return;
+  banner('Запуск YCSB '+mode+' → '+target+'…','info');
+  try{
+    const r=await fetch('/api/ls',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({action:mode,target:target,workload:wl,
+                           threads:thr,records:rec})});
+    const d=await r.json();
+    if(!d.ok)banner('✗ Не запущено: '+(d.error||'?'),'bad');
+  }catch(e){banner('✗ Ошибка запроса: '+e,'bad');}
+  fetchLs();
+}
+
+async function lsStop(){
+  if(!confirm('Остановить текущую YCSB-нагрузку?\n\nКлик = явное согласие '
+      +'на прерывание прогона на тестовом стенде.'))return;
+  banner('Останавливаю YCSB…','info');
+  try{
+    const r=await fetch('/api/ls',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({action:'stop'})});
+    const d=await r.json();
+    if(!d.ok)banner('✗ '+ (d.error||'?'),'bad');
+  }catch(e){banner('✗ Ошибка запроса: '+e,'bad');}
+  fetchLs();
+}
+
+/** Цвет по проценту: <70 зелёный, <90 жёлтый, иначе красный. */
+function heat(p){
+  if(p===null||p===undefined||isNaN(p))return '';
+  return p<70?'ok':(p<90?'warn':'bad');
+}
+function bar(p,txt){
+  const w=(p===null||p===undefined||isNaN(p))?0:Math.max(0,Math.min(100,p));
+  return '<div class="lbar"><div class="lfill '+heat(p)+'" style="width:'+w.toFixed(1)+'%"></div></div>'
+       + '<div class="lval '+(txt?'':'lmiss')+'">'+(txt||'нет данных')+'</div>';
+}
+function gb(mb){ return (mb>=1024)?(mb/1024).toFixed(1)+' ГБ':(mb+' МБ'); }
+
+function renderLoad(){
+  const g = document.getElementById('lgrid'), note = document.getElementById('lnote');
+  if(!g)return;
+  const M = LS && LS.metrics;
+  if(!M || !M.cards){
+    g.innerHTML='';
+    if(note){note.textContent='данных пока нет — опрос при первом открытии вкладки';note.style.display='';}
+    return;
+  }
+  g.innerHTML='';
+  M.cards.forEach(cd=>{
+    const c=document.createElement('div');c.className='card';
+    const L=cd.load||null;
+    let h='<div class="node">'+esc(cd.label);
+    if(cd.role==='PRIMARY')h+='<span class="pbadge" title="реплика-сет: текущий primary">[P]</span>';
+    else if(cd.role==='SECONDARY')h+='<span class="sbadge" title="реплика-сет: secondary">[S]</span>';
+    else if(cd.role)h+='<span class="rbadge" title="реплика-сет: состояние">'+esc(cd.role)+'</span>';
+    h+='</div>';
+    // IP + роль хоста в стенде — всегда видно, даже когда SSH недоступен
+    h+='<div class="lsub">'+esc(cd.ip)+(cd.hint?(' · '+esc(cd.hint)):'')+'</div>';
+    if(cd.error){
+      h+='<div class="err">'+esc(cd.error)+'</div>';
+    }
+    // --- метрики ресурсов ---
+    if(L){
+      h+='<div class="lsec">'
+        +'<div class="lrow"><span class="llab">Load 1/5/15</span>'
+        +'<span class="lnum">'+L.l1.toFixed(2)+' / '+L.l5.toFixed(2)+' / '+L.l15.toFixed(2)+'</span>'
+        +'<span class="lcores">'+L.cores+' core'+(L.cores===1?'':'s')+'</span></div>'
+        +'<div class="lrow"><span class="llab">CPU</span><span class="lwide">'
+        + bar(L.cpu, L.cpu===null||L.cpu===undefined?'':(L.cpu.toFixed(1)+'%'))+'</span></div>'
+        +'<div class="lrow"><span class="llab">RAM</span><span class="lwide">'
+        + bar(L.mem_pct, gb(L.mem_used)+' / '+gb(L.mem_total)+' ('+L.mem_pct.toFixed(0)+'%)')
+        +'</span></div>'
+        +'</div>';
+    }else if(!cd.error){
+      h+='<div class="lsec"><div class="err">метрики: недоступны</div></div>';
+    }
+    // --- сервисы хоста (только чтение: кнопок действий нет) ---
+    const units = Object.keys(cd.units||{});
+    if(units.length){
+      h+='<div class="lhead">Сервисы</div>';
+      units.forEach(u=>{
+        const st=cd.units[u]||'?';
+        const stTxt=(st==='active')?'':esc(st);
+        h+='<div class="svc"><span class="dot '+dotClass(st)+'" title="'+esc(st)+'"></span>'
+          +'<span class="nm" title="'+esc(u)+'">'+esc(u)+'</span>'
+          +'<span class="st">'+stTxt+'</span></div>';
+      });
+    }
+    c.innerHTML=h;g.appendChild(c);
+  });
+  if(note){
+    note.textContent='опрошено '+(M.ts||'')+' · хосты стенда (load-stands), только чтение'
+      +' · обновление каждые '+(LS_IDLE_MS/1000)+' с';
+    note.style.display='';
+  }
+}
+
 async function fetchRuns(){
   try{
     const r=await fetch('/api/tests_hist',{cache:'no-store'});
@@ -1216,6 +1969,15 @@ class Handler(BaseHTTPRequestHandler):
                            json.dumps({"error": repr(e)}, ensure_ascii=False))
         elif self.path == "/api/drout":
             self._send(200, "text/plain", dr_out_tail())
+        elif self.path == "/api/ls":
+            try:
+                payload = {"status": ls_status(), "run": ls_snapshot(),
+                           "out": ls_tail(), "metrics": ls_cards()}
+                self._send(200, "application/json",
+                           json.dumps(payload, ensure_ascii=False))
+            except Exception as e:
+                self._send(500, "application/json",
+                           json.dumps({"error": repr(e)}, ensure_ascii=False))
         elif self.path == "/api/tests_hist":
             with tests_hist_lock:
                 blob = json.dumps({"runs": TESTS_HIST}, ensure_ascii=False)
@@ -1227,7 +1989,7 @@ class Handler(BaseHTTPRequestHandler):
         if not _authorized(self):
             _deny(self)
             return
-        if self.path not in ("/api/svc", "/api/tests", "/api/dr"):
+        if self.path not in ("/api/svc", "/api/tests", "/api/dr", "/api/ls"):
             self._send(404, "text/plain", "not found")
             return
         try:
@@ -1238,6 +2000,15 @@ class Handler(BaseHTTPRequestHandler):
                                 req.get("action", ""))
             elif self.path == "/api/dr":
                 res = start_dr(req.get("mode", ""), req.get("backup", ""))
+            elif self.path == "/api/ls":
+                act = req.get("action", "")
+                if act == "stop":
+                    res = ls_stop()
+                else:
+                    res = ls_start(act, req.get("target", ""),
+                                   req.get("workload", "workloada"),
+                                   req.get("threads", 4),
+                                   req.get("records", 10000))
             else:
                 res = start_tests()
             self._send(200, "application/json",
