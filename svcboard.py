@@ -118,13 +118,14 @@ LS_PORTS = {2351: "10.228.147.51", 2352: "10.228.147.61",
 # ТОЛЬКО чтение: никаких кнопок действий на этих карточках (бриф load-stands).
 LS_HOSTS = [
     {"label": "na-61", "ip": "10.228.147.61", "lport": 2352,
-     "extra": True,          # диск + I/O + кэш монги — как у na-62
+     "extra": True,          # блок extra: диски + I/O + кэш монги
      "role_hint": "MongoDB rs0", "units": ["mongod"]},
     {"label": "na-62", "ip": "10.228.147.62", "lport": 2353,
-     "extra": True,          # диск + кэш монги — метрики только для этой карточки
+     "extra": True,          # блок extra: диски + I/O + кэш монги
      "role_hint": "visordb-proxy → na-61",
      "units": ["visordb-proxy", "mongod", "beholder"]},
     {"label": "na-51", "ip": "10.228.147.51", "lport": 2351,
+     "extra": True,          # загрузка дисков (место + I/O) и кэш монги — просьба 07.10
      "role_hint": "YCSB + Web UI :8080",
      "units": ["mongod", "visordb-proxy", "beholder"]},
     # .63 выключен (VMware) — карточка-заглушка, без SSH.
@@ -348,7 +349,7 @@ def probe_load(cli, timeout=15):
 
 
 def probe_extra(cli, wt=False, timeout=8):
-    """Карточка na-62: диски (df -PT), I/O корня (дельта /proc/diskstats,
+    """Карточки с флагом extra: диски (df -PT), I/O корня (дельта /proc/diskstats,
     как iostat — пакета sysstat на стенде нет) + кэш WiredTiger монги.
 
     Только чтение; таймауты малы (8 с) — висящий хост не должен ронять
@@ -615,7 +616,7 @@ def ls_card(h):
             if states.get("mongod") == "active":
                 card["role"] = probe_role(cli)     # rs0: PRIMARY/SECONDARY
         card["load"] = probe_load(cli)             # sleep 1 внутри — по 1 с/хост
-        if h.get("extra"):                         # только na-62: диски и кэш WT
+        if h.get("extra"):                         # флаг extra: диски, I/O, кэш WT
             card["extra"] = probe_extra(
                 cli, wt=card["units"].get("mongod") == "active")
         if not card["units"] and card["load"]:
@@ -1458,9 +1459,10 @@ button.danger:hover{background:#3a2026}
 .rbadge{background:#3a2a10;border:1px solid #7a5a1a;color:#f5a623;border-radius:6px;padding:1px 7px;font-size:11px;margin-left:8px;vertical-align:middle}
 .primsum{margin-left:auto;font-size:12.5px;color:var(--dim)}
 /* --- вкладка «Нагрузка» --- */
-.lsec{margin-top:10px;padding-top:8px;border-top:1px dashed var(--line);display:flex;flex-direction:column;gap:7px}
-.lrow{display:flex;align-items:baseline;gap:8px;font-size:12.5px}
-.llab{color:var(--dim);width:74px;flex:none}
+.lsec{margin-top:10px;padding-top:8px;border-top:1px dashed var(--line);display:flex;flex-direction:column}
+.lrow{display:flex;align-items:flex-start;gap:8px;font-size:12.5px}
+.lrow+.lrow{border-top:1px solid var(--line);margin-top:6px;padding-top:6px}
+.llab{color:var(--dim);width:74px;flex:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .lnum{font-family:ui-monospace,Consolas,monospace;font-size:13px;color:var(--tx);letter-spacing:.02em}
 .lcores{color:#5c6580;font-size:11px;margin-left:auto}
 .lwide{flex:1;min-width:0}
@@ -1871,7 +1873,7 @@ function renderLoad(){
     }else if(!cd.error){
       h+='<div class="lsec"><div class="err">метрики: недоступны</div></div>';
     }
-    // --- na-62 (extra): диски и кэш WiredTiger монги ---
+    // --- extra (na-51/61/62): диски, I/O, кэш WiredTiger монги ---
     if(cd.extra && (cd.extra.disk||[]).length){
       h+='<div class="lsec">';
       cd.extra.disk.forEach(m=>{

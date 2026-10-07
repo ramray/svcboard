@@ -178,6 +178,15 @@ const harness = `
                  io: {rs: 12.3, ws: 45.6, rmb: 1.2, wmb: 2.0, util: 87.4} },
         load: { l1: 0.11, l5: 0.12, l15: 0.09, cores: 4, cpu: 3.1,
                 mem_used: 1200, mem_total: 3965, mem_pct: 30.2 } },
+      { label: "na-51", ip: "10.228.147.51", hint: "YCSB + Web UI :8080",
+        ok: true, error: "", role: null,
+        units: { "mongod": "active", "visordb-proxy": "active",
+                 "beholder": "active" },
+        extra: { disk: [{mount: "/", size_gb: 60.0, used_gb: 31.4, pct: 52}],
+                 wt: {used: 536870912, max: 1509949440, pct: 35.7},
+                 io: {rs: 150.2, ws: 820.5, rmb: 4.2, wmb: 33.1, util: 41.3} },
+        load: { l1: 2.31, l5: 2.10, l15: 1.87, cores: 8, cpu: 47.5,
+                mem_used: 9000, mem_total: 15700, mem_pct: 57 } },
       { label: "na-63", ip: "10.228.147.63", hint: "два YCSB-генератора (выключен)",
         ok: false, error: "выключен (VMware — поднимается из панели гипервизора)",
         role: null, units: {}, load: null }
@@ -191,7 +200,7 @@ const harness = `
   await fetchLs();
   global.fetch = realFetch;
   const lg = document.getElementById("lgrid");
-  chk("stand grid has 3 cards", lg.children.length === 3, lg.children.length);
+  chk("stand grid has 4 cards", lg.children.length === 4, lg.children.length);
   const cardL = lg.children[0].innerHTML;
   chk("card shows real stand host", cardL.indexOf("na-61") >= 0);
   chk("card shows host ip", cardL.indexOf("10.228.147.61") >= 0);
@@ -222,7 +231,11 @@ const harness = `
   chk("61 disk row rendered", cardL.indexOf("12.3 / 119.2 ГБ (38%)") >= 0);
   chk("61 wt cache row", cardL.indexOf("1.0 ГБ / 22.0 ГБ (4.5%)") >= 0);
   chk("61 disk io row", cardL.indexOf("r 3.5 / w 15.2 ops/s · 1.5 МБ/с · util 6.8%") >= 0);
-  const card63 = lg.children[2].innerHTML;
+  const card51 = lg.children[2].innerHTML;
+  chk("51 root disk row", card51.indexOf("31.4 / 60.0 ГБ (52%)") >= 0);
+  chk("51 wt cache row", card51.indexOf("512.0 МБ / 1.4 ГБ (35.7%)") >= 0);
+  chk("51 disk io row", card51.indexOf("r 150.2 / w 820.5 ops/s · 37.3 МБ/с · util 41.3%") >= 0);
+  const card63 = lg.children[3].innerHTML;
   chk("63 off card shows reason", card63.indexOf("выключен (VMware") >= 0);
   chk("63 has no units section", card63.indexOf("Сервисы") < 0);
   chk("stand note timestamp", (document.getElementById("lnote").textContent || "").indexOf("11:50:12") >= 0);
