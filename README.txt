@@ -102,8 +102,10 @@ STAND:   Нагрузочный стенд (YCSB) — вкладка «Нагр�
          стенде блокируются сервером («идёт прогон YCSB — … заблокированы»).
          Опрос карточек кэшируется 20 с (LS_CARDS_TTL).
          Только na-62 (флаг extra в LS_HOSTS): общее место и занятость
-         дисков (df -PT, до 3 томов) + кэш WiredTiger монги (serverStatus,
-         если mongod активен) — по просьбе пользователя 07.10.
+         дисков (df -PT, до 3 томов), их I/O (r/w ops, МБ/с, %util — дельта
+         /proc/diskstats за 1 с, т.к. пакета sysstat/iostat на стенде нет)
+         и кэш WiredTiger монги (serverStatus, если mongod активен) —
+         по просьбе пользователя 07.10.
          Шапка «Mongo primary: na-22 [P]» на этой вкладке скрыта
          (setTab: primsum display=none) — там про флот, а не про стенд.
          Строка статуса стенда (.lsbox) — display:block + nowrap:

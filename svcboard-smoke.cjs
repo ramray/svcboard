@@ -171,7 +171,8 @@ const harness = `
                  "beholder": "failed" },
         extra: { disk: [{mount: "/", size_gb: 30.4, used_gb: 12.1, pct: 42},
                         {mount: "/home", size_gb: 12.7, used_gb: 1.3, pct: 11}],
-                 wt: {used: 5698458, max: 1509949440, pct: 0.4} },
+                 wt: {used: 5698458, max: 1509949440, pct: 0.4},
+                 io: {rs: 12.3, ws: 45.6, rmb: 1.2, wmb: 2.0, util: 87.4} },
         load: { l1: 0.11, l5: 0.12, l15: 0.09, cores: 4, cpu: 3.1,
                 mem_used: 1200, mem_total: 3965, mem_pct: 30.2 } },
       { label: "na-63", ip: "10.228.147.63", hint: "два YCSB-генератора (выключен)",
@@ -213,8 +214,10 @@ const harness = `
   chk("62 home disk row", card62.indexOf("1.3 / 12.7 ГБ (11%)") >= 0);
   chk("62 wt cache row", card62.indexOf("кэш монги") >= 0
       && card62.indexOf("5.4 МБ / 1.4 ГБ (0.4%)") >= 0);
-  chk("61 has no disk/cache rows", cardL.indexOf("кэш монги") < 0
-      && cardL.indexOf("/home") < 0);
+  chk("62 disk io row", card62.indexOf("диск I/O") >= 0
+      && card62.indexOf("r 12.3 / w 45.6 ops/s · 3.2 МБ/с · util 87.4%") >= 0);
+  chk("61 has no disk/cache/io rows", cardL.indexOf("кэш монги") < 0
+      && cardL.indexOf("диск I/O") < 0 && cardL.indexOf("/home") < 0);
   const card63 = lg.children[2].innerHTML;
   chk("63 off card shows reason", card63.indexOf("выключен (VMware") >= 0);
   chk("63 has no units section", card63.indexOf("Сервисы") < 0);

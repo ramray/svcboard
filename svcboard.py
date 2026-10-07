@@ -347,12 +347,14 @@ def probe_load(cli, timeout=15):
 
 
 def probe_extra(cli, wt=False, timeout=12):
-    """Карточка na-62: общее место/занятость дисков + кэш WiredTiger монги.
+    """Карточка na-62: диски (df -PT), I/O корня (дельта /proc/diskstats,
+    как iostat — пакета sysstat на стенде нет) + кэш WiredTiger монги.
 
-    Только чтение (df -PT и serverStatus); сбой не ломает карточку —
-    вернёт пустые поля. wt=True — только когда mongod активен.
+    Только чтение; сбой не ломает карточку — вернёт пустые поля.
+    wt=True — только когда mongod активен.
     """
-    res = {"disk": [], "wt": None}
+    res = {"disk": [], "io": None, "wt": None}
+    rootfs = ""
     try:
         rc, out, err = run_cmd(cli, "df -PT 2>/dev/null", timeout=timeout)
         for line in out.splitlines()[1:]:
@@ -367,6 +369,8 @@ def probe_extra(cli, wt=False, timeout=12):
                 size, used, pct = int(p[2]), int(p[3]), int(p[5].rstrip("%"))
             except ValueError:
                 continue
+            if p[6] == "/":
+                rootfs = p[0]
             res["disk"].append({"mount": p[6],
                                 "size_gb": round(size / 1048576.0, 1),
                                 "used_gb": round(used / 1048576.0, 1),
@@ -374,6 +378,42 @@ def probe_extra(cli, wt=False, timeout=12):
         res["disk"] = sorted(res["disk"], key=lambda m: -m["size_gb"])[:3]
     except Exception:
         pass
+    # I/O корня: дельта /proc/diskstats за ~1 с (iostat/sysstat на стенде нет)
+    if rootfs:
+        try:
+            cmd = ("echo ROOTDEV=$(basename $(readlink -f '%s')); "
+                   "echo U1=$(cut -d' ' -f1 /proc/uptime); "
+                   "echo ---DA; cat /proc/diskstats; sleep 1; "
+                   "echo U2=$(cut -d' ' -f1 /proc/uptime); "
+                   "echo ---DB; cat /proc/diskstats") % rootfs
+            rc, out, err = run_cmd(cli, cmd, timeout=timeout + 5)
+            dev, sec, t1, t2 = "", None, 0.0, 0.0
+            snap = {"A": {}, "B": {}}
+            for line in out.splitlines():
+                if line.startswith("ROOTDEV="):
+                    dev = line.partition("=")[2].strip()
+                elif line.startswith("U1="):
+                    t1 = float(line[3:])
+                elif line.startswith("U2="):
+                    t2 = float(line[3:])
+                elif line.startswith("---DA"):
+                    sec = "A"
+                elif line.startswith("---DB"):
+                    sec = "B"
+                elif sec and len(line.split()) >= 14:
+                    p = line.split()
+                    snap[sec][p[2]] = [int(x) for x in p[3:14]]
+            a, b = snap["A"].get(dev), snap["B"].get(dev)
+            if a and b and t2 > t1:
+                t = t2 - t1
+                d = [max(0, y - x) for x, y in zip(a, b)]
+                res["io"] = {
+                    "rs": round(d[0] / t, 1), "ws": round(d[4] / t, 1),
+                    "rmb": round(d[2] * 512.0 / 1048576.0 / t, 2),
+                    "wmb": round(d[6] * 512.0 / 1048576.0 / t, 2),
+                    "util": round(max(0.0, min(100.0, d[9] / t / 10.0)), 1)}
+        except Exception:
+            pass
     if wt:
         js = ('try{var c=db.serverStatus().wiredTiger.cache;'
               'print("WTC="+c["bytes currently in the cache"]+","+'
@@ -1841,6 +1881,14 @@ function renderLoad(){
           + bar(cd.extra.wt.pct,
                 bgb(cd.extra.wt.used)+' / '+bgb(cd.extra.wt.max)
                 +' ('+cd.extra.wt.pct.toFixed(1)+'%)')
+          +'</span></div>';
+      }
+      if(cd.extra.io){
+        const io=cd.extra.io;
+        h+='<div class="lrow"><span class="llab">диск I/O</span><span class="lwide">'
+          + bar(io.util,
+                'r '+io.rs.toFixed(1)+' / w '+io.ws.toFixed(1)+' ops/s · '
+                +(io.rmb+io.wmb).toFixed(1)+' МБ/с · util '+io.util.toFixed(1)+'%')
           +'</span></div>';
       }
       h+='</div>';
