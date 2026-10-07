@@ -1380,6 +1380,9 @@ button.danger:hover{background:#3a2026}
 .lsctl{margin-top:10px;gap:10px}
 .lsstat{font-size:12.5px;color:var(--dim)}
 .lsstat b{color:#9fb0d0;font-weight:600}
+/* display:inline гасит глобальный .up{display:flex} (аптайм-Доски) —
+   иначе каждый span в статусе становится блоком и рвёт строку. */
+.lsstat .up,.lsstat .down{display:inline}
 .lsstat .up{color:#7ee2a8}
 .lsstat .down{color:#ff9ea3}
 .lsctl select{background:#1a2136;color:var(--tx);border:1px solid #35405e;border-radius:8px;padding:6px 9px;font-size:12.5px}
@@ -1545,7 +1548,7 @@ const ACTS={
   start:{v:'Запустить',consent:'на запуск',name:'Старт'},
   stop:{v:'Остановить',consent:'на остановку',name:'Стоп'}
 };
-async function act(action,node,unit){
+async function act(action,node,unit,stand){
   const m=ACTS[action];
   if(!confirm(m.v+' '+unit+' на '+node+'?\n\nКлик = явное согласие '+m.consent+' боевого сервиса.'))return;
   banner(m.name+': '+unit+' на '+node+'…','info');
@@ -1556,7 +1559,8 @@ async function act(action,node,unit){
     if(d.ok)banner('✓ принято: '+unit+' на '+node+' ['+action+'] — pre='+d.pre+' → post='+d.post+', '+d.took_s+' с','ok');
     else banner('✗ НЕ принято: '+(d.error||('rc='+d.rc+' post='+d.post))+(d.stderr?'\n'+d.stderr:''),'bad');
   }catch(e){banner('✗ Ошибка запроса: '+e,'bad');}
-  load();
+  if(stand)fetchLs();   // карточка стенда: свой опрос (и сброс её кэша)
+  else load();
 }
 function fmtTs(ts,forceDate){
   const d=new Date(ts*1000),p=n=>String(n).padStart(2,'0');
@@ -1763,7 +1767,7 @@ function renderLoad(){
     }else if(!cd.error){
       h+='<div class="lsec"><div class="err">метрики: недоступны</div></div>';
     }
-    // --- сервисы хоста (только чтение: кнопок действий нет) ---
+    // --- сервисы хоста: те же кнопки RS/GO/SP, что на Доске ---
     const units = Object.keys(cd.units||{});
     if(units.length){
       h+='<div class="lhead">Сервисы</div>';
@@ -1772,7 +1776,12 @@ function renderLoad(){
         const stTxt=(st==='active')?'':esc(st);
         h+='<div class="svc"><span class="dot '+dotClass(st)+'" title="'+esc(st)+'"></span>'
           +'<span class="nm" title="'+esc(u)+'">'+esc(u)+'</span>'
-          +'<span class="st">'+stTxt+'</span></div>';
+          +'<span class="st">'+stTxt+'</span>'
+          +'<span class="btns">'
+          +'<button class="mini" title="Рестарт" onclick="act(\'restart\',\''+esc(cd.label)+'\',\''+esc(u)+'\',1)">RS</button>'
+          +'<button class="mini" title="Старт" onclick="act(\'start\',\''+esc(cd.label)+'\',\''+esc(u)+'\',1)">GO</button>'
+          +'<button class="mini danger" title="Стоп" onclick="act(\'stop\',\''+esc(cd.label)+'\',\''+esc(u)+'\',1)">SP</button>'
+          +'</span></div>';
       });
     }
     c.innerHTML=h;g.appendChild(c);

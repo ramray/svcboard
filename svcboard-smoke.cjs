@@ -197,8 +197,12 @@ const harness = `
   chk("role [P] from card data", cardL.indexOf(">[P]<") >= 0);
   chk("services block header", cardL.indexOf("Сервисы") >= 0);
   chk("unit rendered", cardL.indexOf(">mongod<") >= 0);
-  chk("NO action buttons (read-only stand)", cardL.indexOf(">RS<") < 0
-      && cardL.indexOf(">GO<") < 0 && cardL.indexOf(">SP<") < 0);
+  chk("RS/GO/SP on stand card", cardL.indexOf(">RS<") >= 0
+      && cardL.indexOf(">GO<") >= 0 && cardL.indexOf(">SP<") >= 0);
+  chk("stand buttons carry stand flag", cardL.indexOf("act('restart','na-61','mongod',1)") >= 0);
+  chk("primsum hidden on load tab",
+      document.getElementById("primsum").style.display === "none",
+      document.getElementById("primsum").style.display);
   const card62 = lg.children[1].innerHTML;
   chk("62 units rendered", card62.indexOf(">beholder<") >= 0);
   chk("failed unit visible", card62.indexOf("failed") >= 0);
