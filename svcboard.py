@@ -120,6 +120,7 @@ LS_HOSTS = [
     {"label": "na-61", "ip": "10.228.147.61", "lport": 2352,
      "role_hint": "MongoDB rs0", "units": ["mongod"]},
     {"label": "na-62", "ip": "10.228.147.62", "lport": 2353,
+     "extra": True,          # диск + кэш монги — метрики только для этой карточки
      "role_hint": "visordb-proxy → na-61",
      "units": ["visordb-proxy", "mongod", "beholder"]},
     {"label": "na-51", "ip": "10.228.147.51", "lport": 2351,
@@ -345,6 +346,59 @@ def probe_load(cli, timeout=15):
         return None
 
 
+def probe_extra(cli, wt=False, timeout=12):
+    """Карточка na-62: общее место/занятость дисков + кэш WiredTiger монги.
+
+    Только чтение (df -PT и serverStatus); сбой не ломает карточку —
+    вернёт пустые поля. wt=True — только когда mongod активен.
+    """
+    res = {"disk": [], "wt": None}
+    try:
+        rc, out, err = run_cmd(cli, "df -PT 2>/dev/null", timeout=timeout)
+        for line in out.splitlines()[1:]:
+            p = line.split()
+            if len(p) < 7 or not p[0].startswith("/dev/"):
+                continue
+            if p[1] not in ("ext2", "ext3", "ext4", "xfs", "btrfs", "zfs"):
+                continue
+            if p[6].startswith(("/boot", "/snap", "/efi")):
+                continue
+            try:
+                size, used, pct = int(p[2]), int(p[3]), int(p[5].rstrip("%"))
+            except ValueError:
+                continue
+            res["disk"].append({"mount": p[6],
+                                "size_gb": round(size / 1048576.0, 1),
+                                "used_gb": round(used / 1048576.0, 1),
+                                "pct": pct})
+        res["disk"] = sorted(res["disk"], key=lambda m: -m["size_gb"])[:3]
+    except Exception:
+        pass
+    if wt:
+        js = ('try{var c=db.serverStatus().wiredTiger.cache;'
+              'print("WTC="+c["bytes currently in the cache"]+","+'
+              'c["maximum bytes configured"]);}catch(e){print("WTC=ERR");}')
+        try:
+            rc, out, err = run_cmd(
+                cli,
+                "mongosh -u %s -p %s --authenticationDatabase admin"
+                " --quiet --eval '%s' 2>/dev/null" % (MONGO_USER, MONGO_PASS, js),
+                timeout=timeout)
+            for line in reversed(out.strip().splitlines()):
+                if not line.startswith("WTC="):
+                    continue
+                a = line.partition("=")[2].split(",")
+                if len(a) == 2:
+                    cur, mx = int(a[0]), int(a[1])
+                    if mx > 0:
+                        res["wt"] = {"used": cur, "max": mx,
+                                     "pct": round(cur * 100.0 / mx, 1)}
+                break
+        except Exception:
+            pass
+    return res
+
+
 def probe_all():
     results = [None] * len(NODES)
 
@@ -488,7 +542,8 @@ LS_CARDS_TTL = 20          # сек: не дёргаем SSH на каждый �
 def ls_card(h):
     """Карточка одного хоста стенда: юниты + метрики. Только чтение."""
     card = {"label": h["label"], "ip": h["ip"], "hint": h.get("role_hint", ""),
-            "ok": False, "error": "", "units": {}, "role": None, "load": None}
+            "ok": False, "error": "", "units": {}, "role": None, "load": None,
+            "extra": None}
     if h.get("off"):
         card["error"] = "выключен (VMware — поднимается из панели гипервизора)"
         return card
@@ -518,6 +573,9 @@ def ls_card(h):
             if states.get("mongod") == "active":
                 card["role"] = probe_role(cli)     # rs0: PRIMARY/SECONDARY
         card["load"] = probe_load(cli)             # sleep 1 внутри — по 1 с/хост
+        if h.get("extra"):                         # только na-62: диски и кэш WT
+            card["extra"] = probe_extra(
+                cli, wt=card["units"].get("mongod") == "active")
         if not card["units"] and card["load"]:
             card["ok"] = True      # юнитов нет (не наш случай) — метрики есть
     except Exception as e:
@@ -1728,6 +1786,8 @@ function bar(p,txt){
        + '<div class="lval '+(txt?'':'lmiss')+'">'+(txt||'нет данных')+'</div>';
 }
 function gb(mb){ return (mb>=1024)?(mb/1024).toFixed(1)+' ГБ':(mb+' МБ'); }
+function bgb(b){ return b<1073741824 ? (b/1048576).toFixed(1)+' МБ'
+                                      : (b/1073741824).toFixed(1)+' ГБ'; }
 
 function renderLoad(){
   const g = document.getElementById('lgrid'), note = document.getElementById('lnote');
@@ -1766,6 +1826,24 @@ function renderLoad(){
         +'</div>';
     }else if(!cd.error){
       h+='<div class="lsec"><div class="err">метрики: недоступны</div></div>';
+    }
+    // --- na-62 (extra): диски и кэш WiredTiger монги ---
+    if(cd.extra && (cd.extra.disk||[]).length){
+      h+='<div class="lsec">';
+      cd.extra.disk.forEach(m=>{
+        h+='<div class="lrow"><span class="llab" title="занято на '+esc(m.mount)+'">'
+          +esc(m.mount)+'</span><span class="lwide">'
+          + bar(m.pct, m.used_gb.toFixed(1)+' / '+m.size_gb.toFixed(1)+' ГБ ('+m.pct+'%)')
+          +'</span></div>';
+      });
+      if(cd.extra.wt){
+        h+='<div class="lrow"><span class="llab">кэш монги</span><span class="lwide">'
+          + bar(cd.extra.wt.pct,
+                bgb(cd.extra.wt.used)+' / '+bgb(cd.extra.wt.max)
+                +' ('+cd.extra.wt.pct.toFixed(1)+'%)')
+          +'</span></div>';
+      }
+      h+='</div>';
     }
     // --- сервисы хоста: те же кнопки RS/GO/SP, что на Доске ---
     const units = Object.keys(cd.units||{});
