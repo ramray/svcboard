@@ -156,12 +156,14 @@ PORTS:   49480  HTTP (127.0.0.1)
 CREDS:   All secrets (SSH, Web UI, Mongo) live in creds.json next to svcboard.py -
          gitignored, one copy per machine (template: creds.example.json).
          Web UI: Basic auth from the LAN/internet; 127.0.0.1 skips it.
-          Modern Chromium (Chrome/Edge/Brave) no longer shows the basic-auth
-          dialog, so an unauthenticated GET gets 401 + WWW-Authenticate with
-          an HTML login form in the body: user/pass -> POST /login ->
-          Set-Cookie (svcboard=..., 7 days) -> the board opens; basic auth
-          is still accepted for curl/scripts and prompt-capable browsers
-          (phone). Wrong password -> the form again with an error note.
+          Modern Chromium (Chrome/Edge/Brave) shows its native basic-auth
+          dialog hidden (or never shows it), leaving the tab blocked/white,
+          so the server answers 401 WITHOUT WWW-Authenticate: the browser
+          just renders an HTML login form in the body -> user/pass ->
+          POST /login -> Set-Cookie (svcboard=..., 7 days) -> the board
+          opens; basic auth is still accepted for curl/scripts (curl -u),
+          phone simply uses the same form. Wrong password -> the form
+          again with an error note.
          SSH: one auth attempt per node (lockout protection).
 
 UPDATES: repo https://github.com/ramray/svcboard (private), branch main.

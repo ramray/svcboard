@@ -1345,10 +1345,10 @@ def _authorized(handler):
 
 
 def _login_html(err=""):
-    """Страница входа в теле 401: Chromium-браузеры больше не показывают
-    basic-auth диалог и просто рисуют тело ответа; WWW-Authenticate шлём
-    как раньше — промпт остаётся для других браузеров и ничего не ломает
-    в curl."""
+    """Страница входа в теле 401. WWW-Authenticate НЕ шлём: с ним Chrome
+    поднимает собственное окно пароля (зачастую невидимое) и вкладка висит
+    белым — форма до экрана не доходит. curl это не мешает (он сам шлёт
+    Basic-заголовок), браузеры просто рисуют форму из тела ответа."""
     h = ("<!doctype html>\n"
          '<html lang="ru"><head><meta charset="utf-8">'
          '<meta name="viewport" content="width=device-width, initial-scale=1">'
@@ -1384,9 +1384,11 @@ def _login_html(err=""):
 
 
 def _deny(handler, err=""):
+    # WWW-Authenticate НЕ шлём: с ним Chrome поднимает СВОЁ нативное окно
+    # пароля (оно у части пользователей невидимо и держит вкладку блокированной,
+    # белый экран) и тело ответа с формой до экрана вообще не доходит
     body = _login_html(err).encode("utf-8")
     handler.send_response(401)
-    handler.send_header("WWW-Authenticate", 'Basic realm="svcboard"')
     handler.send_header("Content-Type", "text/html; charset=utf-8")
     handler.send_header("Cache-Control", "no-store")
     handler.send_header("Content-Length", str(len(body)))
