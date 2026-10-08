@@ -10,6 +10,7 @@ Status checks are read-only; restart requires a browser confirm
 (the click itself is the user's explicit consent).
 """
 import base64
+import hashlib
 import json
 import os
 import re
@@ -21,6 +22,7 @@ import threading
 import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs
 
 import paramiko
 
@@ -38,6 +40,8 @@ HTTP_PORT = 49480
 BIND = "0.0.0.0"        # HTTP listen: all interfaces (LAN + port-forwarded internet)
 WEB_USER = CREDS["web_user"]
 WEB_PASS = CREDS["web_pass"]  # Basic auth for every request except this PC's loopback
+# cookie-токен для входа формой: современный Chromium не показывает basic-диалог
+LOGIN_TOKEN = hashlib.sha256((WEB_USER + ":" + WEB_PASS).encode("utf-8")).hexdigest()
 SSH_USER = CREDS["ssh_user"]
 SSH_PASS = CREDS["ssh_pass"]
 MONGO_USER = CREDS["mongo_user"]
@@ -1324,21 +1328,66 @@ def _authorized(handler):
     if handler.client_address[0] in ("127.0.0.1", "::1"):
         return True
     a = handler.headers.get("Authorization", "")
-    if not a.startswith("Basic "):
-        return False
-    try:
-        up = base64.b64decode(a[6:].strip()).decode("utf-8", "replace")
-        u, _, p = up.partition(":")
-    except Exception:
-        return False
-    return u == WEB_USER and p == WEB_PASS
+    if a.startswith("Basic "):
+        try:
+            up = base64.b64decode(a[6:].strip()).decode("utf-8", "replace")
+            u, _, p = up.partition(":")
+        except Exception:
+            u = p = ""
+        if u == WEB_USER and p == WEB_PASS:
+            return True
+    # cookie после входа формой (Chrome/Edge/Brave basic-диалог не показывают)
+    for part in handler.headers.get("Cookie", "").split(";"):
+        k, _, v = part.strip().partition("=")
+        if k == "svcboard" and v == LOGIN_TOKEN:
+            return True
+    return False
 
 
-def _deny(handler):
-    body = b"401: authorization required"
+def _login_html(err=""):
+    """Страница входа в теле 401: Chromium-браузеры больше не показывают
+    basic-auth диалог и просто рисуют тело ответа; WWW-Authenticate шлём
+    как раньше — промпт остаётся для других браузеров и ничего не ломает
+    в curl."""
+    h = ("<!doctype html>\n"
+         '<html lang="ru"><head><meta charset="utf-8">'
+         '<meta name="viewport" content="width=device-width, initial-scale=1">'
+         "<title>svcboard — вход</title>\n"
+         "<style>"
+         ":root{--bg:#0f1420;--card:#171d2c;--line:#242c42;--tx:#e6e9f0;--dim:#8b93a7}"
+         "body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;"
+         "background:var(--bg);color:var(--tx);font:14px/1.45 system-ui,-apple-system,'Segoe UI',sans-serif}"
+         ".box{background:var(--card);border:1px solid var(--line);border-radius:10px;"
+         "padding:26px 28px;width:290px}"
+         "h1{font-size:15px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;"
+         "color:var(--dim);margin:0 0 16px}"
+         "input{width:100%;margin:0 0 10px;padding:8px 10px;background:#101522;"
+         "border:1px solid var(--line);border-radius:6px;color:var(--tx);"
+         "font:13px ui-monospace,Consolas,monospace}"
+         "input:focus{outline:none;border-color:#3b4a75}"
+         "button{width:100%;padding:9px;background:#2b3554;border:1px solid #3b4a75;"
+         "border-radius:6px;color:var(--tx);font-weight:600;cursor:pointer}"
+         "button:hover{background:#33406a}"
+         ".err{color:#ff9ea3;font-size:12px;margin:0 0 10px}"
+         ".hint{color:#5c6580;font-size:11px;margin-top:12px}"
+         "</style></head><body><div class='box'><h1>svcboard</h1>"
+         '<form method="post" action="/login">')
+    if err:
+        h += '<p class="err">' + err + "</p>"
+    h += ('<input name="u" placeholder="логин" autocomplete="username" required autofocus>'
+          '<input type="password" name="p" placeholder="пароль" '
+          'autocomplete="current-password" required>'
+          '<button type="submit">Войти</button></form>'
+          '<p class="hint">basic-auth остаётся: curl и телефоны работают как раньше</p>'
+          "</div></body></html>\n")
+    return h
+
+
+def _deny(handler, err=""):
+    body = _login_html(err).encode("utf-8")
     handler.send_response(401)
     handler.send_header("WWW-Authenticate", 'Basic realm="svcboard"')
-    handler.send_header("Content-Type", "text/plain; charset=utf-8")
+    handler.send_header("Content-Type", "text/html; charset=utf-8")
     handler.send_header("Cache-Control", "no-store")
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
@@ -2087,6 +2136,26 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
 
+    def _login(self):
+        """POST /login: проверка формы -> Set-Cookie -> redirect на главную."""
+        try:
+            ln = int(self.headers.get("Content-Length") or 0)
+            f = parse_qs(self.rfile.read(ln or 0).decode("utf-8", "replace"))
+            u = (f.get("u") or [""])[0]
+            p = (f.get("p") or [""])[0]
+        except Exception:
+            u, p = "", ""
+        if u == WEB_USER and p == WEB_PASS:
+            self.send_response(303)
+            self.send_header("Location", "/")
+            self.send_header("Set-Cookie",
+                             "svcboard=" + LOGIN_TOKEN
+                             + "; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+        else:
+            _deny(self, "Неверный логин или пароль")
+
     def do_GET(self):
         if not _authorized(self):
             _deny(self)
@@ -2127,6 +2196,9 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, "text/plain", "not found")
 
     def do_POST(self):
+        if self.path == "/login":
+            self._login()
+            return
         if not _authorized(self):
             _deny(self)
             return
