@@ -135,7 +135,10 @@ STAND:   Нагрузочный стенд (YCSB) — вкладка «Нагр�
           не стартуют никогда; запуск/стоп = кнопки GO/SP с confirm() либо
           systemctl start/stop). Настройки /etc/ycsb-genN.env: YCSB_MODE
           load|run, WORKLOAD, THREADS, MONGODB_URL (gen1=.61 direct,
-          gen2=.62 proxy), RECORDCOUNT/OPCOUNT/INSERTSTART; скрипт
+          gen2=.62 proxy), RECORDCOUNT/OPCOUNT/INSERTSTART; MONGODB_URL —
+          только в одинарных кавычках (& в URL иначе рвёт строку в bash,
+          переменная уходит в подпроцесс и юнит падает с unbound variable);
+          скрипт
           /usr/local/bin/ycsb-gen.sh, логи ~/ycsb-genN.log. Карточка .63:
           юниты + «Последний прогон» (ops/s, длительность, время — парс
           [OVERALL] хвоста лога; лога нет -> «ещё не гоняли»). YCSB —
