@@ -187,9 +187,11 @@ const harness = `
                  io: {rs: 150.2, ws: 820.5, rmb: 4.2, wmb: 33.1, util: 41.3} },
         load: { l1: 2.31, l5: 2.10, l15: 1.87, cores: 8, cpu: 47.5,
                 mem_used: 9000, mem_total: 15700, mem_pct: 57 } },
-      { label: "na-63", ip: "10.228.147.63", hint: "два YCSB-генератора (выключен)",
-        ok: false, error: "выключен (VMware — поднимается из панели гипервизора)",
-        role: null, units: {}, load: null }
+      { label: "na-63", ip: "10.228.147.63", hint: "два YCSB-генератора (docker)",
+        ok: true, error: "", role: null,
+        units: { "docker": "active" },
+        load: { l1: 0.03, l5: 0.04, l15: 0.01, cores: 4, cpu: 1.2,
+                mem_used: 1300, mem_total: 3965, mem_pct: 33 } },
     ]}
   };
   const realFetch = global.fetch;
@@ -236,8 +238,9 @@ const harness = `
   chk("51 wt cache row", card51.indexOf("512.0 МБ / 1.4 ГБ (35.7%)") >= 0);
   chk("51 disk io row", card51.indexOf("r 150.2 / w 820.5 ops/s · 37.3 МБ/с · util 41.3%") >= 0);
   const card63 = lg.children[3].innerHTML;
-  chk("63 off card shows reason", card63.indexOf("выключен (VMware") >= 0);
-  chk("63 has no units section", card63.indexOf("Сервисы") < 0);
+  chk("63 load rendered", card63.indexOf("0.03 / 0.04 / 0.01") >= 0);
+  chk("63 docker unit", card63.indexOf(">docker<") >= 0);
+  chk("63 off stub gone", card63.indexOf("выключен (VMware") < 0);
   chk("stand note timestamp", (document.getElementById("lnote").textContent || "").indexOf("11:50:12") >= 0);
   chk("stand status line rendered",
       (document.getElementById("lsStatus").innerHTML || "").indexOf("direct") >= 0);

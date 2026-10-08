@@ -116,7 +116,7 @@ LS_HOME = "/opt/ST/ycsb-mongodb"
 LS_OUT = os.path.join(SSH_LAB, "ycsb-load.out")
 # Туннели стенда: порт -> хост (все через lab; в DIRECT-режиме не нужны).
 LS_PORTS = {2351: "10.228.147.51", 2352: "10.228.147.61",
-            2353: "10.228.147.62"}
+            2353: "10.228.147.62", 2354: "10.228.147.63"}
 # Карточки вкладки — РЕАЛЬНЫЕ хосты стенда (load-stands), не флот na-22..57.
 # Юниты — по load-stands\REPORT-inventory.md (инвентаризация 04.10).
 # ТОЛЬКО чтение: никаких кнопок действий на этих карточках (бриф load-stands).
@@ -132,9 +132,10 @@ LS_HOSTS = [
      "extra": True,          # загрузка дисков (место + I/O) и кэш монги — просьба 07.10
      "role_hint": "YCSB + Web UI :8080",
      "units": ["mongod", "visordb-proxy", "beholder"]},
-    # .63 выключен (VMware) — карточка-заглушка, без SSH.
-    {"label": "na-63", "ip": "10.228.147.63", "lport": None, "off": True,
-     "role_hint": "два YCSB-генератора (выключен)", "units": []},
+    # .63 подняли из VMware (08.10) — обычный опрос, туннель 2354
+    {"label": "na-63", "ip": "10.228.147.63", "lport": 2354,
+     "role_hint": "два YCSB-генератора (docker)",
+     "units": ["docker"]},
 ]
 # цель -> host:port, куда шлётся mongodb.url
 LS_TARGETS = {"direct": "10.228.147.61:27017", "proxy": "10.228.147.62:27018"}
