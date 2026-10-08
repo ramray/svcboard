@@ -187,11 +187,16 @@ const harness = `
                  io: {rs: 150.2, ws: 820.5, rmb: 4.2, wmb: 33.1, util: 41.3} },
         load: { l1: 2.31, l5: 2.10, l15: 1.87, cores: 8, cpu: 47.5,
                 mem_used: 9000, mem_total: 15700, mem_pct: 57 } },
-      { label: "na-63", ip: "10.228.147.63", hint: "два YCSB-генератора (docker)",
+      { label: "na-63", ip: "10.228.147.63",
+        hint: "два YCSB-генератора (gen1→.61, gen2→.62)",
         ok: true, error: "", role: null,
-        units: { "docker": "active" },
+        units: { "docker": "active", "ycsb-gen1": "inactive",
+                 "ycsb-gen2": "active" },
         load: { l1: 0.03, l5: 0.04, l15: 0.01, cores: 4, cpu: 1.2,
-                mem_used: 1300, mem_total: 3965, mem_pct: 33 } },
+                mem_used: 1300, mem_total: 3965, mem_pct: 33 },
+        gen: { "ycsb-gen1": null,
+               "ycsb-gen2": { ops: 24531.7, rt: 300123,
+                              when: "08.10 14:32" } } },
     ]}
   };
   const realFetch = global.fetch;
@@ -240,6 +245,12 @@ const harness = `
   const card63 = lg.children[3].innerHTML;
   chk("63 load rendered", card63.indexOf("0.03 / 0.04 / 0.01") >= 0);
   chk("63 docker unit", card63.indexOf(">docker<") >= 0);
+  chk("63 gen units", card63.indexOf(">ycsb-gen1<") >= 0
+      && card63.indexOf(">ycsb-gen2<") >= 0);
+  chk("63 gen buttons", card63.indexOf("act('start','na-63','ycsb-gen2'") >= 0);
+  chk("63 last run stats", card63.indexOf("24.5k ops/s") >= 0
+      && card63.indexOf("08.10 14:32") >= 0);
+  chk("63 no-run hint", card63.indexOf("ещё не гоняли") >= 0);
   chk("63 off stub gone", card63.indexOf("выключен (VMware") < 0);
   chk("stand note timestamp", (document.getElementById("lnote").textContent || "").indexOf("11:50:12") >= 0);
   chk("stand status line rendered",

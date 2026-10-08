@@ -132,10 +132,10 @@ LS_HOSTS = [
      "extra": True,          # загрузка дисков (место + I/O) и кэш монги — просьба 07.10
      "role_hint": "YCSB + Web UI :8080",
      "units": ["mongod", "visordb-proxy", "beholder"]},
-    # .63 подняли из VMware (08.10) — обычный опрос, туннель 2354
+    # .63 подняли из VMware (08.10): два генератора YCSB + статистика прогонов
     {"label": "na-63", "ip": "10.228.147.63", "lport": 2354,
-     "role_hint": "два YCSB-генератора (docker)",
-     "units": ["docker"]},
+     "role_hint": "два YCSB-генератора (gen1→.61, gen2→.62)",
+     "units": ["docker", "ycsb-gen1", "ycsb-gen2"], "gen_logs": True},
 ]
 # цель -> host:port, куда шлётся mongodb.url
 LS_TARGETS = {"direct": "10.228.147.61:27017", "proxy": "10.228.147.62:27018"}
@@ -587,11 +587,46 @@ _ls_cards_cache = {"ts": 0.0, "data": None}
 LS_CARDS_TTL = 20          # сек: не дёргаем SSH на каждый тик фронта
 
 
+def probe_gen(cli, gens):
+    """Последний прогон генераторов: две строки [OVERALL] из ~/ycsb-genN.log.
+
+    Лог дописывается каждым прогоном; берётся хвост: RunTime(ms) +
+    Throughput(ops/sec) последнего прогона + mtime файла как «когда».
+    Файла ещё нет / прогонов не было -> значение None (на карточке —
+    «ещё не гоняли»).
+    """
+    res = {}
+    for g in gens:
+        res[g] = None
+        n = g[len("ycsb-gen"):]
+        cmd = ("f=$HOME/ycsb-gen" + n + ".log; [ -f \"$f\" ] || exit 0; "
+               "t=$(date -r \"$f\" +%s); "
+               "o=$(grep -a '\\[OVERALL\\]' \"$f\" | tail -2 | tr '\\n' ';'); "
+               "echo \"G" + n + "=$t=$o\"")
+        try:
+            rc, out, err = run_cmd(cli, cmd, timeout=10)
+        except Exception:
+            continue
+        for line in out.splitlines():
+            if not line.startswith("G" + n + "="):
+                continue
+            _, _, rest = line.partition("=")
+            ts, _, o = rest.partition("=")
+            mrt = re.search(r"RunTime\(ms\),\s*(\d+)", o)
+            mtp = re.search(r"Throughput\(ops/sec\),\s*([\d.]+)", o)
+            if mrt and mtp and ts.isdigit():
+                res[g] = {"rt": int(mrt.group(1)),
+                          "ops": round(float(mtp.group(1)), 1),
+                          "when": time.strftime("%d.%m %H:%M",
+                                                time.localtime(int(ts)))}
+    return res
+
+
 def ls_card(h):
     """Карточка одного хоста стенда: юниты + метрики. Только чтение."""
     card = {"label": h["label"], "ip": h["ip"], "hint": h.get("role_hint", ""),
             "ok": False, "error": "", "units": {}, "role": None, "load": None,
-            "extra": None}
+            "extra": None, "gen": None}
     if h.get("off"):
         card["error"] = "выключен (VMware — поднимается из панели гипервизора)"
         return card
@@ -624,6 +659,9 @@ def ls_card(h):
         if h.get("extra"):                         # флаг extra: диски, I/O, кэш WT
             card["extra"] = probe_extra(
                 cli, wt=card["units"].get("mongod") == "active")
+        gens = [u for u in units if u.startswith("ycsb-gen")]
+        if h.get("gen_logs") and gens:
+            card["gen"] = probe_gen(cli, gens)
         if not card["units"] and card["load"]:
             card["ok"] = True      # юнитов нет (не наш случай) — метрики есть
     except Exception as e:
@@ -1966,6 +2004,20 @@ function renderLoad(){
           +'<button class="mini" title="Старт" onclick="act(\'start\',\''+esc(cd.label)+'\',\''+esc(u)+'\',1)">GO</button>'
           +'<button class="mini danger" title="Стоп" onclick="act(\'stop\',\''+esc(cd.label)+'\',\''+esc(u)+'\',1)">SP</button>'
           +'</span></div>';
+      });
+    }
+    // --- генераторы (.63): последний прогон из логов ---
+    if(cd.gen){
+      h+='<div class="lhead">Последний прогон</div>';
+      Object.keys(cd.gen).forEach(u=>{
+        const g=cd.gen[u];
+        let txt='ещё не гоняли';
+        if(g){
+          const ops=g.ops>=1000?(g.ops/1000).toFixed(1)+'k':Math.round(g.ops)+'';
+          txt=ops+' ops/s · '+Math.round(g.rt/1000)+' с · '+g.when;
+        }
+        h+='<div class="lrow"><span class="llab">'+esc(u.replace('ycsb-',''))+'</span>'
+          +'<span class="lwide">'+txt+'</span></div>';
       });
     }
     c.innerHTML=h;g.appendChild(c);

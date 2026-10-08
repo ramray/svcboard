@@ -91,7 +91,7 @@ STAND:   Нагрузочный стенд (YCSB) — вкладка «Нагр�
            na-61 10.228.147.61  mongod (rs0, target direct)
            na-62 10.228.147.62  visordb-proxy, mongod, beholder (target proxy)
            na-51 10.228.147.51  mongod, visordb-proxy, beholder + YCSB/Web UI
-           na-63 10.228.147.63  два YCSB-генератора (docker; включены 08.10)
+           na-63 10.228.147.63  два YCSB-генератора (gen1→.61, gen2→.62; включены 08.10)
          В каждой карточке: IP и роль хоста, юниты (systemctl is-active),
          метрики (load 1/5/15, CPU%, RAM), роль реплики [P]/[S],
          кнопки RS/GO/SP — как на Доске (по прямому указанию пользователя
@@ -131,6 +131,15 @@ STAND:   Нагрузочный стенд (YCSB) — вкладка «Нагр�
          (скобки [l]/[r] — чтобы pkill не убил собственную оболочку).
          Статус (read-only, кэш 20 с): bin/ycsb, цели direct/proxy по nc,
          Web UI :8080, ping .63, идущие процессы ycsb.
+          Генераторы .63: юниты ycsb-gen1/2 (без [Install] — с загрузкой
+          не стартуют никогда; запуск/стоп = кнопки GO/SP с confirm() либо
+          systemctl start/stop). Настройки /etc/ycsb-genN.env: YCSB_MODE
+          load|run, WORKLOAD, THREADS, MONGODB_URL (gen1=.61 direct,
+          gen2=.62 proxy), RECORDCOUNT/OPCOUNT/INSERTSTART; скрипт
+          /usr/local/bin/ycsb-gen.sh, логи ~/ycsb-genN.log. Карточка .63:
+          юниты + «Последний прогон» (ops/s, длительность, время — парс
+          [OVERALL] хвоста лога; лога нет -> «ещё не гоняли»). YCSB —
+          копия с .51 (/opt/ST/ycsb-mongodb), Java 17 на .63 есть.
          Белый список workload: workloada…f, tsworkloada; URI строится из
          creds.json (mongo_user/mongo_pass), в логи не пишется.
          ВАЖНО: обе кнопки требуют confirm() — клик есть явное согласие
