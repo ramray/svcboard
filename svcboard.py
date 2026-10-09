@@ -116,7 +116,7 @@ LS_HOME = "/opt/ST/ycsb-mongodb"
 LS_OUT = os.path.join(SSH_LAB, "ycsb-load.out")
 # Туннели стенда: порт -> хост (все через lab; в DIRECT-режиме не нужны).
 LS_PORTS = {2351: "10.228.147.51", 2352: "10.228.147.61",
-            2353: "10.228.147.62", 2354: "10.228.147.63"}
+            2353: "10.228.147.62"}
 # Карточки вкладки — РЕАЛЬНЫЕ хосты стенда (load-stands), не флот na-22..57.
 # Юниты — по load-stands\REPORT-inventory.md (инвентаризация 04.10).
 # ТОЛЬКО чтение: никаких кнопок действий на этих карточках (бриф load-stands).
@@ -132,10 +132,6 @@ LS_HOSTS = [
      "extra": True,          # загрузка дисков (место + I/O) и кэш монги — просьба 07.10
      "role_hint": "YCSB + Web UI :8080",
      "units": ["mongod", "visordb-proxy", "beholder"]},
-    # .63 подняли из VMware (08.10): два генератора YCSB + статистика прогонов
-    {"label": "na-63", "ip": "10.228.147.63", "lport": 2354,
-     "role_hint": "два YCSB-генератора (gen1→.61, gen2→.62)",
-     "units": ["docker", "ycsb-gen1", "ycsb-gen2"], "gen_logs": True},
 ]
 # цель -> host:port, куда шлётся mongodb.url
 LS_TARGETS = {"direct": "10.228.147.61:27017", "proxy": "10.228.147.62:27018"}
@@ -481,7 +477,7 @@ def get_status():
 # ================= Нагрузочный стенд: туннель и SSH =================
 
 def ensure_ls_tunnel():
-    """Туннели стенда 2351-2354 -> .51/.61/.62/.63:22 через lab.
+    """Туннели стенда 2351-2353 -> .51/.61/.62:22 через lab.
 
     Не трогает статус-туннель 2333-2336 и тестовый 2222. Поднимает только
     недостающие порты (уже поднятые переиспользует — как у DR).
@@ -551,13 +547,12 @@ def ls_status(force=False):
     if not force and _ls_status_cache["data"] and now - _ls_status_cache["ts"] < 20:
         return _ls_status_cache["data"]
     out = {"ok": False, "error": "", "ycsb": "", "targets": {},
-           "gen63": "?", "procs": [], "ui": "?"}
+           "procs": [], "ui": "?"}
     # Стрелки НЕ нужны: bash даёт /dev/tcp и nc; проверяем через nc (есть на .51)
     cmd = ("echo YCSB=$(test -x %s/bin/ycsb && echo yes || echo no); "
            "echo UI=$(nc -z -w2 10.228.147.51 8080 && echo up || echo down); "
            "echo T_direct=$(nc -z -w3 10.228.147.61 27017 && echo up || echo down); "
            "echo T_proxy=$(nc -z -w3 10.228.147.62 27018 && echo up || echo down); "
-           "echo G63=$(ping -c1 -W1 -q 10.228.147.63 >/dev/null 2>&1 && echo up || echo down); "
            "pgrep -af 'bin/ycsb [l]oad|bin/ycsb [r]un' | head -3"
            ) % LS_HOME
     try:
@@ -571,8 +566,6 @@ def ls_status(force=False):
             elif line.startswith("T_"):
                 k, _, v = line.partition("=")
                 out["targets"][k[2:]] = v
-            elif line.startswith("G63="):
-                out["gen63"] = line.partition("=")[2]
             elif "bin/ycsb" in line:
                 out["procs"].append(line.strip())
     except Exception as e:
@@ -587,46 +580,11 @@ _ls_cards_cache = {"ts": 0.0, "data": None}
 LS_CARDS_TTL = 20          # сек: не дёргаем SSH на каждый тик фронта
 
 
-def probe_gen(cli, gens):
-    """Последний прогон генераторов: две строки [OVERALL] из ~/ycsb-genN.log.
-
-    Лог дописывается каждым прогоном; берётся хвост: RunTime(ms) +
-    Throughput(ops/sec) последнего прогона + mtime файла как «когда».
-    Файла ещё нет / прогонов не было -> значение None (на карточке —
-    «ещё не гоняли»).
-    """
-    res = {}
-    for g in gens:
-        res[g] = None
-        n = g[len("ycsb-gen"):]
-        cmd = ("f=$HOME/ycsb-gen" + n + ".log; [ -f \"$f\" ] || exit 0; "
-               "t=$(date -r \"$f\" +%s); "
-               "o=$(grep -a '\\[OVERALL\\]' \"$f\" | tail -2 | tr '\\n' ';'); "
-               "echo \"G" + n + "=$t=$o\"")
-        try:
-            rc, out, err = run_cmd(cli, cmd, timeout=10)
-        except Exception:
-            continue
-        for line in out.splitlines():
-            if not line.startswith("G" + n + "="):
-                continue
-            _, _, rest = line.partition("=")
-            ts, _, o = rest.partition("=")
-            mrt = re.search(r"RunTime\(ms\),\s*(\d+)", o)
-            mtp = re.search(r"Throughput\(ops/sec\),\s*([\d.]+)", o)
-            if mrt and mtp and ts.isdigit():
-                res[g] = {"rt": int(mrt.group(1)),
-                          "ops": round(float(mtp.group(1)), 1),
-                          "when": time.strftime("%d.%m %H:%M",
-                                                time.localtime(int(ts)))}
-    return res
-
-
 def ls_card(h):
     """Карточка одного хоста стенда: юниты + метрики. Только чтение."""
     card = {"label": h["label"], "ip": h["ip"], "hint": h.get("role_hint", ""),
             "ok": False, "error": "", "units": {}, "role": None, "load": None,
-            "extra": None, "gen": None}
+            "extra": None}
     if h.get("off"):
         card["error"] = "выключен (VMware — поднимается из панели гипервизора)"
         return card
@@ -659,9 +617,6 @@ def ls_card(h):
         if h.get("extra"):                         # флаг extra: диски, I/O, кэш WT
             card["extra"] = probe_extra(
                 cli, wt=card["units"].get("mongod") == "active")
-        gens = [u for u in units if u.startswith("ycsb-gen")]
-        if h.get("gen_logs") and gens:
-            card["gen"] = probe_gen(cli, gens)
         if not card["units"] and card["load"]:
             card["ok"] = True      # юнитов нет (не наш случай) — метрики есть
     except Exception as e:
@@ -1795,7 +1750,7 @@ function setTab(t){
 }
 
 // ===================== Вкладка «Нагрузка» =====================
-// Карточки = РЕАЛЬНЫЕ хосты стенда (na-61/62/51/63), не флот na-22..57:
+// Карточки = РЕАЛЬНЫЕ хосты стенда (na-61/62/51), не флот na-22..57:
 // статусы юнитов + метрики (load/CPU/RAM) приходят одним опросом /api/ls
 // (см. LS_HOSTS в бэкенде; источник — load-stands\REPORT-inventory.md).
 // Только чтение: кнопок действий на этих карточках НЕТ (бриф load-stands).
@@ -1841,7 +1796,7 @@ function renderLs(){
   }else{
     const t=st.targets||{};
     s.innerHTML='цели: direct '+lsUp(t.direct)+' · proxy '+lsUp(t.proxy)
-      +' · UI('+lsUp(st.ui)+') · gen .63 '+lsUp(st.gen63)
+      +' · UI('+lsUp(st.ui)+')'
       +' · ycsb '+lsUp(st.ycsb)
       +(st.procs&&st.procs.length?' · <b>идёт: '+st.procs.length+' проц.</b>':'');
   }
@@ -2004,20 +1959,6 @@ function renderLoad(){
           +'<button class="mini" title="Старт" onclick="act(\'start\',\''+esc(cd.label)+'\',\''+esc(u)+'\',1)">GO</button>'
           +'<button class="mini danger" title="Стоп" onclick="act(\'stop\',\''+esc(cd.label)+'\',\''+esc(u)+'\',1)">SP</button>'
           +'</span></div>';
-      });
-    }
-    // --- генераторы (.63): последний прогон из логов ---
-    if(cd.gen){
-      h+='<div class="lhead">Последний прогон</div>';
-      Object.keys(cd.gen).forEach(u=>{
-        const g=cd.gen[u];
-        let txt='ещё не гоняли';
-        if(g){
-          const ops=g.ops>=1000?(g.ops/1000).toFixed(1)+'k':Math.round(g.ops)+'';
-          txt=ops+' ops/s · '+Math.round(g.rt/1000)+' с · '+g.when;
-        }
-        h+='<div class="lrow"><span class="llab">'+esc(u.replace('ycsb-',''))+'</span>'
-          +'<span class="lwide">'+txt+'</span></div>';
       });
     }
     c.innerHTML=h;g.appendChild(c);

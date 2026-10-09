@@ -155,7 +155,7 @@ const harness = `
   chk("lnote has hint", (document.getElementById("lnote").textContent || "").length > 0);
   // подменяем fetch для /api/ls и рендерим карточки хостов стенда
   const LSSTATUS = {
-    status: { ok: true, ycsb: "yes", ui: "up", gen63: "down",
+    status: { ok: true, ycsb: "yes", ui: "up",
               targets: { direct: "up", proxy: "up" }, procs: [] },
     run: { state: "idle" },
     out: "",
@@ -187,16 +187,6 @@ const harness = `
                  io: {rs: 150.2, ws: 820.5, rmb: 4.2, wmb: 33.1, util: 41.3} },
         load: { l1: 2.31, l5: 2.10, l15: 1.87, cores: 8, cpu: 47.5,
                 mem_used: 9000, mem_total: 15700, mem_pct: 57 } },
-      { label: "na-63", ip: "10.228.147.63",
-        hint: "два YCSB-генератора (gen1→.61, gen2→.62)",
-        ok: true, error: "", role: null,
-        units: { "docker": "active", "ycsb-gen1": "inactive",
-                 "ycsb-gen2": "active" },
-        load: { l1: 0.03, l5: 0.04, l15: 0.01, cores: 4, cpu: 1.2,
-                mem_used: 1300, mem_total: 3965, mem_pct: 33 },
-        gen: { "ycsb-gen1": null,
-               "ycsb-gen2": { ops: 24531.7, rt: 300123,
-                              when: "08.10 14:32" } } },
     ]}
   };
   const realFetch = global.fetch;
@@ -207,7 +197,7 @@ const harness = `
   await fetchLs();
   global.fetch = realFetch;
   const lg = document.getElementById("lgrid");
-  chk("stand grid has 4 cards", lg.children.length === 4, lg.children.length);
+  chk("stand grid has 3 cards", lg.children.length === 3, lg.children.length);
   const cardL = lg.children[0].innerHTML;
   chk("card shows real stand host", cardL.indexOf("na-61") >= 0);
   chk("card shows host ip", cardL.indexOf("10.228.147.61") >= 0);
@@ -242,16 +232,7 @@ const harness = `
   chk("51 root disk row", card51.indexOf("31.4 / 60.0 ГБ (52%)") >= 0);
   chk("51 wt cache row", card51.indexOf("512.0 МБ / 1.4 ГБ (35.7%)") >= 0);
   chk("51 disk io row", card51.indexOf("r 150.2 / w 820.5 ops/s · 37.3 МБ/с · util 41.3%") >= 0);
-  const card63 = lg.children[3].innerHTML;
-  chk("63 load rendered", card63.indexOf("0.03 / 0.04 / 0.01") >= 0);
-  chk("63 docker unit", card63.indexOf(">docker<") >= 0);
-  chk("63 gen units", card63.indexOf(">ycsb-gen1<") >= 0
-      && card63.indexOf(">ycsb-gen2<") >= 0);
-  chk("63 gen buttons", card63.indexOf("act('start','na-63','ycsb-gen2'") >= 0);
-  chk("63 last run stats", card63.indexOf("24.5k ops/s") >= 0
-      && card63.indexOf("08.10 14:32") >= 0);
-  chk("63 no-run hint", card63.indexOf("ещё не гоняли") >= 0);
-  chk("63 off stub gone", card63.indexOf("выключен (VMware") < 0);
+  chk("no na-63 card (stand rework)", lg.innerHTML.indexOf("na-63") < 0);
   chk("stand note timestamp", (document.getElementById("lnote").textContent || "").indexOf("11:50:12") >= 0);
   chk("stand status line rendered",
       (document.getElementById("lsStatus").innerHTML || "").indexOf("direct") >= 0);
