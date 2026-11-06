@@ -91,6 +91,14 @@ STAND:   Нагрузочный стенд (YCSB) — вкладка «Нагр�
            na-61 10.228.147.61  mongod (rs0, target direct)
            na-62 10.228.147.62  visordb-proxy, mongod, beholder (target proxy)
            na-51 10.228.147.51  mongod, visordb-proxy, beholder + YCSB/Web UI
+            na-63 10.228.147.63  docker active; mongod 8.3.2 + beholder установлены,
+                                 но не запущены (disabled); visordb-proxy нет;
+                                 генераторы ycsb-gen1/2 сняты 09.10 (карточка
+                                 возвращена по запросу 05.11)
+            na-52 10.228.147.52  stress-test (YCSB Web Runner :8080) + docker
+                                 active; mongod/sbm-agent/proxy/visord
+                                 установлены и лежат; beholder failed
+                                 (добавлен по запросу 06.11)
          В каждой карточке: IP и роль хоста, юниты (systemctl is-active),
          метрики (load 1/5/15, CPU%, RAM), роль реплики [P]/[S],
          кнопки RS/GO/SP — как на Доске (по прямому указанию пользователя
@@ -100,9 +108,9 @@ STAND:   Нагрузочный стенд (YCSB) — вкладка «Нагр�
          карточек (_ls_cards_cache). Пока идёт прогон YCSB — действия на
          стенде блокируются сервером («идёт прогон YCSB — … заблокированы»).
          Опрос карточек кэшируется 20 с (LS_CARDS_TTL).
-         na-51, na-61 и na-62 (флаг extra в LS_HOSTS): общее место и занятость
+         na-51, na-61, na-62, na-63 и na-52 (флаг extra в LS_HOSTS): общее место и занятость
          дисков (df -PT, до 3 томов), их I/O (r/w ops, МБ/с, %util — дельта
-         /proc/diskstats за 1 с, т.к. пакета sysstat/iostat на стенде нет)
+         /proc/diskstats за 1 с — работает и без sysstat; сам iostat поставлен 05.11 (hold))
          и кэш WiredTiger монги (serverStatus, если mongod активен) —
          по просьбе пользователя 07.10 (таймауты проб малы, висящий хост
          не роняет карточку); na-51 добавлен той же датой (метрика загрузки
@@ -117,7 +125,7 @@ STAND:   Нагрузочный стенд (YCSB) — вкладка «Нагр�
          (setTab: primsum display=none) — там про флот, а не про стенд.
          Строка статуса стенда (.lsbox) — display:block + nowrap:
          наследование flex от .tbox рвало её построчно.
-         Туннели: 2351->.51, 2352->.61, 2353->.62 через lab; поднимаются по
+         Туннели: 2351->.51, 2352->.61, 2353->.62, 2354->.63, 2355->.52 через lab; поднимаются по
          требованию одним ssh (только недостающие порты), в DIRECT не нужны.
          API: GET /api/ls -> {status, run, out, metrics}; POST /api/ls
          {action:'load'|'run', target:'direct'|'proxy', workload, threads,
@@ -148,7 +156,7 @@ PORTS:   49480  HTTP (127.0.0.1)
          2333-2336  SSH tunnel to 10.228.147.22/23/24/57 via host 'lab'
                      (separate from the slash-command tunnel 2222-2225, no clash;
                       a stale tunnel on 2333-2336 is killed automatically on start)
-         2351-2353  SSH tunnels to the load stand 10.228.147.51/61/62 via
+         2351-2355  SSH tunnels to the load stand 10.228.147.51/61/62/63/52 via
                'lab' (YCSB; own tunnels, spawned on demand by /api/ls, killed
                 by stop-svcboard.ps1; not touched by the status tunnel)
 

@@ -187,6 +187,28 @@ const harness = `
                  io: {rs: 150.2, ws: 820.5, rmb: 4.2, wmb: 33.1, util: 41.3} },
         load: { l1: 2.31, l5: 2.10, l15: 1.87, cores: 8, cpu: 47.5,
                 mem_used: 9000, mem_total: 15700, mem_pct: 57 } },
+      { label: "na-63", ip: "10.228.147.63",
+        hint: "docker-хост; mongod/beholder установлены, не запущены",
+        ok: true, error: "", role: null,
+        units: { "docker": "active", "mongod": "inactive",
+                 "beholder": "inactive" },
+        extra: { disk: [{mount: "/", size_gb: 60.0, used_gb: 15.8, pct: 26}],
+                 wt: null,
+                 io: {rs: 1.2, ws: 4.8, rmb: 0.1, wmb: 0.3, util: 2.1} },
+        load: { l1: 0.05, l5: 0.04, l15: 0.0, cores: 4, cpu: 1.2,
+                mem_used: 620, mem_total: 3965, mem_pct: 15.6 } },
+      { label: "na-52", ip: "10.228.147.52",
+        hint: "YCSB Web Runner (stress-test) :8080 + docker",
+        ok: true, error: "", role: null,
+        units: { "stress-test": "active", "docker": "active",
+                 "mongod": "inactive", "sbm-agent": "inactive",
+                 "beholder": "failed", "visordb-proxy": "inactive",
+                 "visord": "inactive" },
+        extra: { disk: [{mount: "/", size_gb: 60.0, used_gb: 20.5, pct: 34}],
+                 wt: null,
+                 io: {rs: 0.5, ws: 2.2, rmb: 0.0, wmb: 0.2, util: 1.4} },
+        load: { l1: 0.31, l5: 0.28, l15: 0.19, cores: 4, cpu: 5.5,
+                mem_used: 1500, mem_total: 3965, mem_pct: 38 } },
     ]}
   };
   const realFetch = global.fetch;
@@ -197,7 +219,7 @@ const harness = `
   await fetchLs();
   global.fetch = realFetch;
   const lg = document.getElementById("lgrid");
-  chk("stand grid has 3 cards", lg.children.length === 3, lg.children.length);
+  chk("stand grid has 5 cards", lg.children.length === 5, lg.children.length);
   const cardL = lg.children[0].innerHTML;
   chk("card shows real stand host", cardL.indexOf("na-61") >= 0);
   chk("card shows host ip", cardL.indexOf("10.228.147.61") >= 0);
@@ -232,7 +254,20 @@ const harness = `
   chk("51 root disk row", card51.indexOf("31.4 / 60.0 ГБ (52%)") >= 0);
   chk("51 wt cache row", card51.indexOf("512.0 МБ / 1.4 ГБ (35.7%)") >= 0);
   chk("51 disk io row", card51.indexOf("r 150.2 / w 820.5 ops/s · 37.3 МБ/с · util 41.3%") >= 0);
-  chk("no na-63 card (stand rework)", lg.innerHTML.indexOf("na-63") < 0);
+  chk("na-63 card present (возвращена по запросу 05.11)", lg.innerHTML.indexOf("na-63") >= 0);
+  const card63 = lg.children[3];
+  chk("63 units rendered (docker/mongod/beholder)", card63.innerHTML.indexOf(">docker<") >= 0
+      && card63.innerHTML.indexOf(">mongod<") >= 0
+      && card63.innerHTML.indexOf(">beholder<") >= 0);
+  chk("63 disk row rendered", card63.innerHTML.indexOf("15.8 / 60.0 ГБ (26%)") >= 0);
+  chk("63 io row rendered (iostat-like)", card63.innerHTML.indexOf("r 1.2 / w 4.8 ops/s") >= 0);
+  chk("63 has no wt row (mongod inactive)", card63.innerHTML.indexOf("кэш монги") < 0);
+  const card52 = lg.children[4];
+  chk("na-52 card present", card52.innerHTML.indexOf("na-52") >= 0);
+  chk("52 units rendered (7 юнитов)", card52.innerHTML.indexOf(">stress-test<") >= 0
+      && card52.innerHTML.indexOf(">visord<") >= 0
+      && card52.innerHTML.indexOf("failed") >= 0);
+  chk("52 disk row rendered", card52.innerHTML.indexOf("20.5 / 60.0 ГБ (34%)") >= 0);
   chk("stand note timestamp", (document.getElementById("lnote").textContent || "").indexOf("11:50:12") >= 0);
   chk("stand status line rendered",
       (document.getElementById("lsStatus").innerHTML || "").indexOf("direct") >= 0);

@@ -116,7 +116,8 @@ LS_HOME = "/opt/ST/ycsb-mongodb"
 LS_OUT = os.path.join(SSH_LAB, "ycsb-load.out")
 # Туннели стенда: порт -> хост (все через lab; в DIRECT-режиме не нужны).
 LS_PORTS = {2351: "10.228.147.51", 2352: "10.228.147.61",
-            2353: "10.228.147.62"}
+            2353: "10.228.147.62", 2354: "10.228.147.63",
+            2355: "10.228.147.52"}
 # Карточки вкладки — РЕАЛЬНЫЕ хосты стенда (load-stands), не флот na-22..57.
 # Юниты — по load-stands\REPORT-inventory.md (инвентаризация 04.10).
 # ТОЛЬКО чтение: никаких кнопок действий на этих карточках (бриф load-stands).
@@ -132,6 +133,22 @@ LS_HOSTS = [
      "extra": True,          # загрузка дисков (место + I/O) и кэш монги — просьба 07.10
      "role_hint": "YCSB + Web UI :8080",
      "units": ["mongod", "visordb-proxy", "beholder"]},
+    # .63 снова в составе (запрос 05.11): юнитов ycsb-gen1/2 уже нет —
+    # генераторы сняты при «stand rework» (коммит 09.10). Установлены docker
+    # (daemon active, контейнеров нет), mongod 8.3.2 и beholder — но все
+    # disabled/не запущены; visordb-proxy отсутствует (проверено 05.11).
+    {"label": "na-63", "ip": "10.228.147.63", "lport": 2354,
+     "extra": True,          # диски + I/O (дельта diskstats — как iostat) — запрос 05.11
+     "role_hint": "docker-хост; mongod/beholder установлены, не запущены",
+     "units": ["docker", "mongod", "beholder"]},
+    # na-52 (запрос 06.11): YCSB Web Runner (stress-test, юзер dkharisov, :8080)
+    # + docker работают; mongod/sbm-agent/visordb-proxy/visord установлены и
+    # лежат, beholder failed (проверено 06.11).
+    {"label": "na-52", "ip": "10.228.147.52", "lport": 2355,
+     "extra": True,          # диски + I/O (дельта diskstats) — как у всех на вкладке
+     "role_hint": "YCSB Web Runner (stress-test) :8080 + docker",
+     "units": ["stress-test", "docker", "mongod", "sbm-agent", "beholder",
+               "visordb-proxy", "visord"]},
 ]
 # цель -> host:port, куда шлётся mongodb.url
 LS_TARGETS = {"direct": "10.228.147.61:27017", "proxy": "10.228.147.62:27018"}
@@ -351,7 +368,7 @@ def probe_load(cli, timeout=15):
 
 def probe_extra(cli, wt=False, timeout=8):
     """Карточки с флагом extra: диски (df -PT), I/O корня (дельта /proc/diskstats,
-    как iostat — пакета sysstat на стенде нет) + кэш WiredTiger монги.
+    как iostat — код не зависит от sysstat; сам iostat на стенде с 05.11) + кэш WiredTiger монги.
 
     Только чтение; таймауты малы (8 с) — висящий хост не должен ронять
     карточку целиком, сбой вернёт пустые поля. wt=True — только когда
@@ -382,7 +399,8 @@ def probe_extra(cli, wt=False, timeout=8):
         res["disk"] = sorted(res["disk"], key=lambda m: -m["size_gb"])[:3]
     except Exception:
         pass
-    # I/O корня: дельта /proc/diskstats за ~1 с (iostat/sysstat на стенде нет)
+    # I/O корня: дельта /proc/diskstats за ~1 с (работает и без iostat;
+    # сам sysstat/iostat появился на стенде 05.11, apt-mark hold)
     if rootfs:
         try:
             cmd = ("echo ROOTDEV=$(basename $(readlink -f '%s')); "
@@ -477,7 +495,7 @@ def get_status():
 # ================= Нагрузочный стенд: туннель и SSH =================
 
 def ensure_ls_tunnel():
-    """Туннели стенда 2351-2353 -> .51/.61/.62:22 через lab.
+    """Туннели стенда 2351-2355 -> .51/.61/.62/.63/.52:22 через lab.
 
     Не трогает статус-туннель 2333-2336 и тестовый 2222. Поднимает только
     недостающие порты (уже поднятые переиспользует — как у DR).
@@ -875,7 +893,7 @@ def do_action(label, unit, action):
             if not ensure_tunnel():
                 return {"ok": False, "error": "tunnel down"}
         elif not ensure_ls_tunnel():
-            return {"ok": False, "error": "стенд-туннель (2351-2353) не поднялся"}
+            return {"ok": False, "error": "стенд-туннель (2351-2355) не поднялся"}
         try:
             if stand is None:
                 cli = ssh_connect(n["ip"] if DIRECT else n["lport"], timeout=10)
@@ -1480,8 +1498,8 @@ button.tab.on{background:#1e2740;border-color:#35405e;color:var(--tx)}
 .fid{color:#ff9ea3}
 .ferr{color:#c76b70;font-size:11px;white-space:pre-wrap;max-height:140px;overflow-y:auto}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px}
-#lgrid{grid-template-columns:repeat(auto-fill,minmax(360px,1fr))}
-@media (max-width:600px){#lgrid{grid-template-columns:repeat(auto-fill,minmax(300px,1fr))}}
+#lgrid{grid-template-columns:repeat(4,minmax(0,1fr))} /* все карточки в одном ряду (05.11) */
+@media (max-width:600px){#lgrid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
 .node{font-weight:600;font-size:13px;letter-spacing:.06em;color:#9fb0d0;margin-bottom:6px}
 .svc{display:flex;align-items:center;gap:10px;padding:9px 0;border-top:1px solid var(--line)}
@@ -1893,13 +1911,18 @@ function renderLoad(){
   M.cards.forEach(cd=>{
     const c=document.createElement('div');c.className='card';
     const L=cd.load||null;
-    let h='<div class="node">'+esc(cd.label);
+    // шапка: строка1 — label + бейдж + IP (не режется), строка2 — роль хоста
+    // целиком («хлебные крошки» доведены на отдельную строку, 05.11)
+    let h='<div class="node" style="white-space:nowrap;overflow:hidden;'
+        +'text-overflow:ellipsis" title="'
+        +esc(cd.label+(cd.role?(' ['+cd.role+']'):'')+' · '+cd.ip)+'">'+esc(cd.label);
     if(cd.role==='PRIMARY')h+='<span class="pbadge" title="реплика-сет: текущий primary">[P]</span>';
     else if(cd.role==='SECONDARY')h+='<span class="sbadge" title="реплика-сет: secondary">[S]</span>';
     else if(cd.role)h+='<span class="rbadge" title="реплика-сет: состояние">'+esc(cd.role)+'</span>';
+    h+='<span class="lsub"> · '+esc(cd.ip)+'</span>';
     h+='</div>';
-    // IP + роль хоста в стенде — всегда видно, даже когда SSH недоступен
-    h+='<div class="lsub">'+esc(cd.ip)+(cd.hint?(' · '+esc(cd.hint)):'')+'</div>';
+    if(cd.hint)h+='<div class="lsub" style="margin:-4px 0 6px;overflow-wrap:anywhere"'
+       +' title="'+esc(cd.hint)+'">'+esc(cd.hint)+'</div>';
     if(cd.error){
       h+='<div class="err">'+esc(cd.error)+'</div>';
     }

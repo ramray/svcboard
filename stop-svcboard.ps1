@@ -11,7 +11,7 @@ if ($svc) {
 }
 
 $tun = Get-NetTCPConnection -State Listen |
-  Where-Object { $_.LocalPort -in 2333,2334,2335,2336,2351,2352,2353 }
+  Where-Object { $_.LocalPort -in 2333,2334,2335,2336,2351,2352,2353,2354,2355 }
 if ($tun) {
   $tun.OwningProcess | Select-Object -Unique | ForEach-Object {
     Stop-Process -Id $_ -Force
@@ -35,14 +35,14 @@ if ($tt) {
 
 Start-Sleep -Milliseconds 500
 $left = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
-  Where-Object { $_.LocalPort -in 49480,2222,2333,2334,2335,2336,2351,2352,2353 }
+  Where-Object { $_.LocalPort -in 49480,2222,2333,2334,2335,2336,2351,2352,2353,2354,2355 }
 
 if ($hits) {
   $msg = "$(Get-Date -Format s) stopped: " + ($hits -join ', ')
   $msg | Add-Content "$env:TEMP\svcboard-start.log"
   $msg
   if ($left) { "WARNING still listening: " + (($left.LocalPort | Sort-Object -Unique) -join ',') }
-  else { "CLEAN: 49480, 2222, 2333-2336, 2351-2353 free" }
+  else { "CLEAN: 49480, 2222, 2333-2336, 2351-2355 free" }
 } else {
   "svcboard not running"
 }
