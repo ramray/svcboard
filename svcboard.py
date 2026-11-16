@@ -67,8 +67,14 @@ if DIRECT:
     # ноутбук: свой профиль (USERPROFILE\ssh-lab) и свой интерпретатор
     # (тот же, куда поставлен paramiko)
     PYTHON = sys.executable
-    SSH_LAB = os.path.join(os.environ.get("USERPROFILE", r"C:\Users\User"),
-                           "ssh-lab")
+    if os.name == "nt":
+        SSH_LAB = os.path.join(os.environ.get("USERPROFILE", r"C:\Users\User"),
+                               "ssh-lab")
+    else:
+        # Linux: папка ssh-lab рядом с репозиторием (../ssh-lab от svcboard.py)
+        SSH_LAB = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "ssh-lab")
 else:
     PYTHON = r"C:\Users\User\miniconda3\python.exe"
     SSH_LAB = r"C:\Users\User\Documents\Default Project\ssh-lab"
@@ -1499,7 +1505,7 @@ button.tab.on{background:#1e2740;border-color:#35405e;color:var(--tx)}
 .ferr{color:#c76b70;font-size:11px;white-space:pre-wrap;max-height:140px;overflow-y:auto}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px}
 #lgrid{grid-template-columns:repeat(4,minmax(0,1fr))} /* все карточки в одном ряду (05.11) */
-@media (max-width:600px){#lgrid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:600px){#lgrid{grid-template-columns:1fr}} /* телефон: один хост в строке */
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
 .node{font-weight:600;font-size:13px;letter-spacing:.06em;color:#9fb0d0;margin-bottom:6px}
 .svc{display:flex;align-items:center;gap:10px;padding:9px 0;border-top:1px solid var(--line)}
