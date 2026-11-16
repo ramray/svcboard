@@ -108,6 +108,17 @@ DR = {"state": "idle", "mode": None, "backup": None, "started": None,
       "started_ts": None, "ended": None, "rc": None, "error": "",
       "tunnels": ""}
 
+# E2E-тест ТК-СКЗ-001 (ssh-lab\e2e_test.py): сквозной сценарий
+# бэкап -> инцидент -> блокировка -> восстановление (этапы 2-8 кейса).
+# Туннели переиспользуют DR-порты 2242-2245 (ноды 22/23/24/57), с DR и
+# автотестами одновременно не запускается.
+E2E_TEST = os.path.join(SSH_LAB, "e2e_test.py")
+E2E_OUT = os.path.join(SSH_LAB, "e2e-test.out")
+E2E_TIMEOUT = 1800              # 30 минут (опрос обнаружения до 8 мин)
+e2e_ctl = threading.Lock()
+E2E = {"state": "idle", "started": None, "started_ts": None, "ended": None,
+       "rc": None, "result": None, "summary": [], "error": ""}
+
 # ================= Нагрузочный стенд (load-stands) =================
 # YCSB живёт на 10.228.147.51 и шлёт в .61:27017 (direct) или
 # .62:27018 (proxy). С ПК хосты стенда достижимы только через ноут lab,
@@ -983,6 +994,8 @@ def start_tests():
             return {"ok": False, "error": "already running"}
         if DR["state"] == "running":
             return {"ok": False, "error": "идёт dr_easy (сценарий кластера)"}
+        if E2E["state"] == "running":
+            return {"ok": False, "error": "идёт E2E ТК-СКЗ-001"}
         TESTS.update({"state": "running", "started": time.strftime("%H:%M:%S"),
                       "started_ts": time.time(), "ended": None, "rc": None,
                       "pytest_rc": None, "summary": [], "tail": "",
@@ -1140,6 +1153,8 @@ def start_dr(mode, backup):
     with dr_ctl:
         if DR["state"] == "running":
             return {"ok": False, "error": "dr_easy уже выполняется"}
+        if E2E["state"] == "running":
+            return {"ok": False, "error": "идёт E2E ТК-СКЗ-001"}
         if TESTS["state"] == "running":
             return {"ok": False, "error": "идут автотесты — дождитесь их конца"}
         DR.update({"state": "running", "mode": mode, "backup": backup,
@@ -1213,6 +1228,109 @@ def dr_worker(mode, backup):
         DR["state"] = "done"
         log("DR done: mode=%s rc=%s error=%s"
             % (DR.get("mode"), DR.get("rc"), DR.get("error") or "-"))
+
+
+def e2e_snapshot():
+    d = dict(E2E)
+    if d.get("state") == "running" and d.get("started_ts"):
+        d["elapsed_s"] = int(time.time() - d["started_ts"])
+    return d
+
+
+def parse_e2e_out():
+    """__SUMMARY_* и __Mn_* маркеры из e2e-test.out (формат run_tests.py)."""
+    try:
+        with open(E2E_OUT, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except Exception:
+        return {}
+    summary = re.findall(r"(?m)^__SUMMARY_\w+=.*$", text)[:6]
+    marks = re.findall(r"(?m)^__M\d+_\w+=.*$", text)
+    result = None
+    m = re.search(r"(?m)^__SUMMARY_RESULT=(\S+)", text)
+    if m:
+        result = m.group(1)
+    return {"summary": summary, "marks": marks, "result": result}
+
+
+def start_e2e():
+    with e2e_ctl:
+        if not os.path.exists(E2E_TEST):
+            return {"ok": False, "error": "e2e_test.py не найден: %s" % E2E_TEST}
+        if E2E["state"] == "running":
+            return {"ok": False, "error": "e2e_test уже выполняется"}
+        if TESTS["state"] == "running":
+            return {"ok": False, "error": "идут автотесты dev-02"}
+        if DR["state"] == "running":
+            return {"ok": False, "error": "идёт dr_easy (сценарий кластера)"}
+        E2E.update({"state": "running", "started": time.strftime("%H:%M:%S"),
+                    "started_ts": time.time(), "ended": None, "rc": None,
+                    "result": None, "summary": [], "error": ""})
+    log("E2E start requested")
+    threading.Thread(target=e2e_worker, daemon=True).start()
+    return {"ok": True}
+
+
+def e2e_worker():
+    tp = None
+    try:
+        if DIRECT:
+            log("E2E: режим --direct, туннели не нужны")
+        else:
+            need = list(DR_PORTS.keys())[:4]      # 2242-2245: ноды 22/23/24/57
+            have = [p for p in need if port_listening(p)]
+            miss = [p for p in need if p not in have]
+            if miss:
+                args = ["ssh", "-N", "-o", "ExitOnForwardFailure=yes",
+                        "-o", "ServerAliveInterval=15",
+                        "-o", "ServerAliveCountMax=3"]
+                for p in miss:
+                    args += ["-L", "127.0.0.1:%d:%s:22" % (p, DR_PORTS[p])]
+                args += [TUNNEL_HOST]
+                tp = subprocess.Popen(args, creationflags=CREATE_NO_WINDOW)
+                for _ in range(12):
+                    time.sleep(1)
+                    if tp.poll() is not None:
+                        raise RuntimeError("e2e-туннель умер на старте (rc=%s)"
+                                           % tp.returncode)
+                    if all(port_listening(p) for p in miss):
+                        break
+                if not all(port_listening(p) for p in miss):
+                    raise RuntimeError("e2e-туннели не поднялись: %s" % miss)
+                log("E2E tunnel up pid=%d ports=%s" % (tp.pid, miss))
+            else:
+                log("E2E: туннельные порты уже подняты: %s" % have)
+        env = dict(os.environ)
+        env["PYTHONIOENCODING"] = "utf-8"
+        if DIRECT:
+            env["SVCBOARD_DIRECT"] = "1"
+        cmd = [PYTHON, E2E_TEST]
+        with open(E2E_OUT, "w", encoding="utf-8", errors="replace") as fo:
+            fo.write("$ %s\n\n" % " ".join(cmd))
+            fo.flush()
+            r = subprocess.run(cmd, cwd=SSH_LAB, stdout=fo,
+                               stderr=subprocess.STDOUT, env=env,
+                               timeout=E2E_TIMEOUT)
+        E2E["rc"] = r.returncode
+        parsed = parse_e2e_out()
+        if parsed:
+            E2E.update(parsed)
+    except subprocess.TimeoutExpired:
+        E2E["error"] = "таймаут %d мин — процесс прерван" % (E2E_TIMEOUT // 60)
+        log("E2E worker: timeout %ds" % E2E_TIMEOUT)
+    except Exception as e:
+        E2E["error"] = repr(e)
+        log("E2E worker FAIL: %r" % e)
+    finally:
+        if tp is not None and tp.poll() is None:
+            try:
+                tp.kill()
+            except Exception:
+                pass
+        E2E["ended"] = time.strftime("%H:%M:%S")
+        E2E["state"] = "done"
+        log("E2E done: rc=%s result=%s error=%s"
+            % (E2E.get("rc"), E2E.get("result"), E2E.get("error") or "-"))
 
 
 HISTORY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -1599,6 +1717,8 @@ footer{margin-top:16px;color:#5c6580;font-size:12px;display:flex;gap:14px;align-
 <pre id="tsum"></pre>
 <div class="tbox tbox-bottom" id="drbox"><span class="drlabel">DR-сценарий (dr_easy):</span><button id="drb0" class="dbtn" onclick="startDr('fresh')">⚠ fresh — новый кластер</button><button id="drb1" class="dbtn" onclick="startDr('restore')">♻ restore — с восстановлением</button><input id="drbak" value="2026-10-03T22:19:33Z" spellcheck="false" title="Имя бэкапа (для restore)"><span id="drstate"></span></div>
 <pre id="drout"></pre>
+<div class="tbox tbox-bottom" id="e2ebox"><span class="drlabel">ТК-СКЗ-001 (сквозной):</span><button id="e2ebtn" class="dbtn" onclick="startE2e()">▶ E2E бэкап→инцидент→восстановление</button><span id="e2estate"></span></div>
+<pre id="e2eout"></pre>
 <div class="hist">
   <div class="hhead"><span>Результаты прогонов</span><span class="hstart" id="runsn"></span></div>
   <div class="runs" id="runs"><span class="empty">загрузка…</span></div>
@@ -1684,13 +1804,17 @@ function render(data){
   }
   renderTests(data.tests);
   renderDr(data.dr);
-  const av=data.avail||{tests:true,dr:true};
+  renderE2e(data.e2e);
+  const av=data.avail||{tests:true,dr:true,e2e:true};
   const tbs=document.getElementById('testsbox'),tsm=document.getElementById('tsum');
   if(tbs)tbs.style.display=av.tests?'':'none';
   if(tsm&&!av.tests)tsm.style.display='none';
   const dbs=document.getElementById('drbox'),dou=document.getElementById('drout');
   if(dbs)dbs.style.display=av.dr?'':'none';
   if(dou&&!av.dr)dou.style.display='none';
+  const ebs=document.getElementById('e2ebox'),eou=document.getElementById('e2eout');
+  if(ebs)ebs.style.display=av.e2e?'':'none';
+  if(eou&&!av.e2e)eou.style.display='none';
   renderHistory(data.history);
   const hb=document.getElementById('tabfail');
   if(hb){
@@ -2133,6 +2257,48 @@ async function startDr(mode){
   }catch(e){banner('✗ Ошибка запроса: '+e,'bad');}
   load();
 }
+let e2eTick=null,e2eOutTick=null;
+async function refreshE2eOut(){
+  try{
+    const r=await fetch('/api/e2eout',{cache:'no-store'});
+    if(!r.ok)return;
+    const t=await r.text();
+    const o=document.getElementById('e2eout');
+    o.textContent=t;o.style.display=t?'block':'none';
+  }catch(e){}
+}
+function renderE2e(d){
+  const b=document.getElementById('e2ebtn'),s=document.getElementById('e2estate');
+  if(e2eTick){clearInterval(e2eTick);e2eTick=null;}
+  if(e2eOutTick){clearInterval(e2eOutTick);e2eOutTick=null;}
+  if(!b||!d)return;
+  if(d.state==='running'){
+    b.disabled=true;
+    const upd=()=>{const e=d.started_ts?Math.max(0,Math.floor(Date.now()/1000-d.started_ts)):0;
+      s.className='';s.textContent='ТК-СКЗ-001 · старт '+d.started+' · '+e+' с';};
+    upd();e2eTick=setInterval(upd,1000);
+    refreshE2eOut();e2eOutTick=setInterval(refreshE2eOut,3000);
+    return;
+  }
+  b.disabled=false;
+  if(d.state==='done'){
+    const pass=d.result==='PASS';
+    s.className=(d.error?'bad':(pass?'ok':'bad'));
+    s.textContent=(d.error?('ошибка: '+d.error):(d.result+' · '+(d.summary||[]).filter(x=>x.indexOf('PASSED')>0||x.indexOf('DURATION')>0).map(x=>x.replace('__SUMMARY_','')).join(' · ')))
+      +(d.ended?' · завершён '+d.ended:'');
+    refreshE2eOut();
+  }else{s.className='';s.textContent='';}
+}
+async function startE2e(){
+  if(!confirm('Запустить E2E ТК-СКЗ-001?\n\nБэкап → инцидент (mv .wt-файла) →\nблокировка БД → восстановление из копии.\n~2-10 минут, затрагивает тестовую БД e2e_check.\n\nКлик = согласие на запуск.'))return;
+  try{
+    const r=await fetch('/api/e2e',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+    const d=await r.json();
+    if(!d.ok)banner('✗ E2E не запущен: '+d.error,'bad');
+    else banner('E2E ТК-СКЗ-001 запущен — вывод ниже, таймер рядом с кнопкой.','info');
+  }catch(e){banner('✗ Ошибка запроса: '+e,'bad');}
+  load();
+}
 render({nodes:NODES.map(n=>({label:n.label,ok:true,
   units:Object.fromEntries(n.units.map(u=>[u,'?']))}))});
 load();
@@ -2192,8 +2358,10 @@ class Handler(BaseHTTPRequestHandler):
                 payload = get_status()
                 payload["tests"] = tests_snapshot()
                 payload["dr"] = dr_snapshot()
+                payload["e2e"] = e2e_snapshot()
                 payload["avail"] = {"tests": os.path.exists(RUNNER),
-                                    "dr": os.path.exists(DR_EASY)}
+                                    "dr": os.path.exists(DR_EASY),
+                                    "e2e": os.path.exists(E2E_TEST)}
                 payload["history"] = history_payload()
                 payload["hist_n"] = len(TESTS_HIST)
                 payload["hist_fail"] = tests_hist_fail_count()
@@ -2204,6 +2372,13 @@ class Handler(BaseHTTPRequestHandler):
                            json.dumps({"error": repr(e)}, ensure_ascii=False))
         elif self.path == "/api/drout":
             self._send(200, "text/plain", dr_out_tail())
+        elif self.path == "/api/e2eout":
+            try:
+                with open(E2E_OUT, "r", encoding="utf-8", errors="replace") as f:
+                    lines = f.readlines()
+                self._send(200, "text/plain", "".join(lines[-60:]))
+            except Exception:
+                self._send(200, "text/plain", "")
         elif self.path == "/api/ls":
             try:
                 payload = {"status": ls_status(), "run": ls_snapshot(),
@@ -2227,7 +2402,8 @@ class Handler(BaseHTTPRequestHandler):
         if not _authorized(self):
             _deny(self)
             return
-        if self.path not in ("/api/svc", "/api/tests", "/api/dr", "/api/ls"):
+        if self.path not in ("/api/svc", "/api/tests", "/api/dr", "/api/ls",
+                             "/api/e2e"):
             self._send(404, "text/plain", "not found")
             return
         try:
@@ -2238,6 +2414,8 @@ class Handler(BaseHTTPRequestHandler):
                                 req.get("action", ""))
             elif self.path == "/api/dr":
                 res = start_dr(req.get("mode", ""), req.get("backup", ""))
+            elif self.path == "/api/e2e":
+                res = start_e2e()
             elif self.path == "/api/ls":
                 act = req.get("action", "")
                 if act == "stop":
