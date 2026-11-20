@@ -119,6 +119,17 @@ e2e_ctl = threading.Lock()
 E2E = {"state": "idle", "started": None, "started_ts": None, "ended": None,
        "rc": None, "result": None, "summary": [], "error": ""}
 
+# ТК-РКВ-007 (ssh-lab\dr_rkv007.py): восстановление после полного удаления
+# данных. fresh - новый кластер без восстановления, restore - новый кластер
+# + восстановление из инкрементального бэкапа. С DR/автотестами/E2E
+# одновременно не запускается (тот же ресурс - ноды rs0).
+RK_TEST = os.path.join(SSH_LAB, "dr_rkv007.py")
+RK_OUT = os.path.join(SSH_LAB, "dr-rkv007.out")
+RK_TIMEOUT = 2400               # 40 минут (restore ~2-15 мин + сборка)
+rk_ctl = threading.Lock()
+RK = {"state": "idle", "mode": None, "started": None, "started_ts": None,
+      "ended": None, "rc": None, "result": None, "summary": [], "error": ""}
+
 # ================= Нагрузочный стенд (load-stands) =================
 # YCSB живёт на 10.228.147.51 и шлёт в .61:27017 (direct) или
 # .62:27018 (proxy). С ПК хосты стенда достижимы только через ноут lab,
@@ -996,6 +1007,8 @@ def start_tests():
             return {"ok": False, "error": "идёт dr_easy (сценарий кластера)"}
         if E2E["state"] == "running":
             return {"ok": False, "error": "идёт E2E ТК-СКЗ-001"}
+        if RK["state"] == "running":
+            return {"ok": False, "error": "идёт ТК-РКВ-007"}
         TESTS.update({"state": "running", "started": time.strftime("%H:%M:%S"),
                       "started_ts": time.time(), "ended": None, "rc": None,
                       "pytest_rc": None, "summary": [], "tail": "",
@@ -1155,6 +1168,8 @@ def start_dr(mode, backup):
             return {"ok": False, "error": "dr_easy уже выполняется"}
         if E2E["state"] == "running":
             return {"ok": False, "error": "идёт E2E ТК-СКЗ-001"}
+        if RK["state"] == "running":
+            return {"ok": False, "error": "идёт ТК-РКВ-007"}
         if TESTS["state"] == "running":
             return {"ok": False, "error": "идут автотесты — дождитесь их конца"}
         DR.update({"state": "running", "mode": mode, "backup": backup,
@@ -1263,6 +1278,8 @@ def start_e2e():
             return {"ok": False, "error": "идут автотесты dev-02"}
         if DR["state"] == "running":
             return {"ok": False, "error": "идёт dr_easy (сценарий кластера)"}
+        if RK["state"] == "running":
+            return {"ok": False, "error": "идёт ТК-РКВ-007"}
         E2E.update({"state": "running", "started": time.strftime("%H:%M:%S"),
                     "started_ts": time.time(), "ended": None, "rc": None,
                     "result": None, "summary": [], "error": ""})
@@ -1331,6 +1348,90 @@ def e2e_worker():
         E2E["state"] = "done"
         log("E2E done: rc=%s result=%s error=%s"
             % (E2E.get("rc"), E2E.get("result"), E2E.get("error") or "-"))
+
+
+def rk_snapshot():
+    d = dict(RK)
+    if d.get("state") == "running" and d.get("started_ts"):
+        d["elapsed_s"] = int(time.time() - d["started_ts"])
+    return d
+
+
+def parse_rk_out():
+    """__SUMMARY_* маркеры из dr-rkv007.out (формат dr_rkv007.py)."""
+    try:
+        with open(RK_OUT, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except Exception:
+        return {}
+    summary = re.findall(r"(?m)^__SUMMARY_\w+=.*$", text)[:8]
+    marks = re.findall(r"(?m)^__M\d+_\w+=.*$", text)
+    result = None
+    m = re.search(r"(?m)^__SUMMARY_RESULT=(\S+)", text)
+    if m:
+        result = m.group(1)
+    return {"summary": summary, "marks": marks, "result": result}
+
+
+def start_rk(mode, backup):
+    """ТК-РКВ-007: fresh = новый кластер, restore = + восстановление
+    из инкрементального бэкапа (пустое имя = последний incremental)."""
+    with rk_ctl:
+        if not os.path.exists(RK_TEST):
+            return {"ok": False, "error": "dr_rkv007.py не найден: %s" % RK_TEST}
+        if mode not in ("fresh", "restore"):
+            return {"ok": False, "error": "mode должен быть fresh или restore"}
+        if RK["state"] == "running":
+            return {"ok": False, "error": "ТК-РКВ-007 уже выполняется"}
+        if TESTS["state"] == "running":
+            return {"ok": False, "error": "идут автотесты dev-02"}
+        if DR["state"] == "running":
+            return {"ok": False, "error": "идёт dr_easy (сценарий кластера)"}
+        if E2E["state"] == "running":
+            return {"ok": False, "error": "идёт E2E ТК-СКЗ-001"}
+        backup = (backup or "").strip()
+        RK.update({"state": "running", "mode": mode, "backup": backup,
+                   "started": time.strftime("%H:%M:%S"),
+                   "started_ts": time.time(), "ended": None, "rc": None,
+                   "result": None, "summary": [], "error": ""})
+    log("ТК-РКВ-007 start requested: %s %s" % (mode, backup or "(auto)"))
+    threading.Thread(target=rk_worker, daemon=True).start()
+    return {"ok": True}
+
+
+def rk_worker():
+    tp = None
+    try:
+        if DIRECT:
+            log("ТК-РКВ-007: режим --direct, туннели не нужны")
+        env = dict(os.environ)
+        env["PYTHONIOENCODING"] = "utf-8"
+        if DIRECT:
+            env["SVCBOARD_DIRECT"] = "1"
+        cmd = [PYTHON, RK_TEST, RK["mode"]]
+        if RK.get("backup"):
+            cmd.append(RK["backup"])
+        with open(RK_OUT, "w", encoding="utf-8", errors="replace") as fo:
+            fo.write("$ %s\n\n" % " ".join(cmd))
+            fo.flush()
+            r = subprocess.run(cmd, cwd=SSH_LAB, stdout=fo,
+                               stderr=subprocess.STDOUT, env=env,
+                               timeout=RK_TIMEOUT)
+        RK["rc"] = r.returncode
+        parsed = parse_rk_out()
+        if parsed:
+            RK.update(parsed)
+    except subprocess.TimeoutExpired:
+        RK["error"] = "таймаут %d мин — процесс прерван" % (RK_TIMEOUT // 60)
+        log("ТК-РКВ-007: timeout %ds" % RK_TIMEOUT)
+    except Exception as e:
+        RK["error"] = repr(e)
+        log("ТК-РКВ-007 worker FAIL: %r" % e)
+    finally:
+        RK["ended"] = time.strftime("%H:%M:%S")
+        RK["state"] = "done"
+        log("ТК-РКВ-007 done: rc=%s result=%s error=%s"
+            % (RK.get("rc"), RK.get("result"), RK.get("error") or "-"))
 
 
 HISTORY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -1555,7 +1656,7 @@ button.tbtn:disabled{opacity:.55;cursor:default}
 #tstate.warn{color:#f5a623}
 #tstate.bad{color:#ff9ea3}
 #tsum{display:none;margin:0 0 16px;padding:10px 14px;background:var(--card);border:1px solid var(--line);border-radius:10px;font-size:12px;color:#9fb0d0;white-space:pre-wrap;overflow-x:auto;font-family:ui-monospace,Consolas,monospace}
-#drout{display:none;margin:0 0 16px;padding:10px 14px;background:var(--card);border:1px solid var(--line);border-radius:10px;font-size:12px;color:#9fb0d0;white-space:pre-wrap;overflow-x:auto;max-height:420px;overflow-y:auto;font-family:ui-monospace,Consolas,monospace}
+#drout,#e2eout,#rkout{display:none;margin:0 0 16px;padding:10px 14px;background:var(--card);border:1px solid var(--line);border-radius:10px;font-size:12px;color:#9fb0d0;white-space:pre-wrap;overflow-x:auto;max-height:420px;overflow-y:auto;font-family:ui-monospace,Consolas,monospace}
 .drlabel{color:var(--dim);font-size:12.5px}
 #drbak{background:#1a2136;color:var(--tx);border:1px solid #35405e;border-radius:8px;padding:5px 10px;font-size:12.5px;width:210px;font-family:ui-monospace,Consolas,monospace}
 #drbak:disabled{opacity:.5}
@@ -1719,6 +1820,8 @@ footer{margin-top:16px;color:#5c6580;font-size:12px;display:flex;gap:14px;align-
 <pre id="drout"></pre>
 <div class="tbox tbox-bottom" id="e2ebox"><span class="drlabel">ТК-СКЗ-001 (сквозной):</span><button id="e2ebtn" class="dbtn" onclick="startE2e()">▶ E2E бэкап→инцидент→восстановление</button><span id="e2estate"></span></div>
 <pre id="e2eout"></pre>
+<div class="tbox tbox-bottom" id="rkbox"><span class="drlabel">ТК-РКВ-007 (удаление/восстановление):</span><button id="rkb0" class="dbtn" onclick="startRk('fresh')">⚠ fresh — новый кластер</button><button id="rkb1" class="dbtn" onclick="startRk('restore')">♻ restore — инкрементальный бэкап</button><input id="rkbak" value="" spellcheck="false" title="Имя бэкапа (пусто = последний incremental)"><span id="rkstate"></span></div>
+<pre id="rkout"></pre>
 <div class="hist">
   <div class="hhead"><span>Результаты прогонов</span><span class="hstart" id="runsn"></span></div>
   <div class="runs" id="runs"><span class="empty">загрузка…</span></div>
@@ -1805,7 +1908,8 @@ function render(data){
   renderTests(data.tests);
   renderDr(data.dr);
   renderE2e(data.e2e);
-  const av=data.avail||{tests:true,dr:true,e2e:true};
+  renderRk(data.rk);
+  const av=data.avail||{tests:true,dr:true,e2e:true,rk:true};
   const tbs=document.getElementById('testsbox'),tsm=document.getElementById('tsum');
   if(tbs)tbs.style.display=av.tests?'':'none';
   if(tsm&&!av.tests)tsm.style.display='none';
@@ -1815,6 +1919,9 @@ function render(data){
   const ebs=document.getElementById('e2ebox'),eou=document.getElementById('e2eout');
   if(ebs)ebs.style.display=av.e2e?'':'none';
   if(eou&&!av.e2e)eou.style.display='none';
+  const rbs=document.getElementById('rkbox'),rou=document.getElementById('rkout');
+  if(rbs)rbs.style.display=av.rk?'':'none';
+  if(rou&&!av.rk)rou.style.display='none';
   renderHistory(data.history);
   const hb=document.getElementById('tabfail');
   if(hb){
@@ -2299,6 +2406,54 @@ async function startE2e(){
   }catch(e){banner('✗ Ошибка запроса: '+e,'bad');}
   load();
 }
+let rkTick=null,rkOutTick=null;
+async function refreshRkOut(){
+  try{
+    const r=await fetch('/api/rkout',{cache:'no-store'});
+    if(!r.ok)return;
+    const t=await r.text();
+    const o=document.getElementById('rkout');
+    o.textContent=t;o.style.display=t?'block':'none';
+  }catch(e){}
+}
+function renderRk(d){
+  const b0=document.getElementById('rkb0'),b1=document.getElementById('rkb1'),s=document.getElementById('rkstate');
+  if(rkTick){clearInterval(rkTick);rkTick=null;}
+  if(rkOutTick){clearInterval(rkOutTick);rkOutTick=null;}
+  if(!b0||!d)return;
+  if(d.state==='running'){
+    b0.disabled=true;b1.disabled=true;
+    const upd=()=>{const e=d.started_ts?Math.max(0,Math.floor(Date.now()/1000-d.started_ts)):0;
+      s.className='';s.textContent='ТК-РКВ-007 '+d.mode+' · старт '+d.started+' · '+e+' с';};
+    upd();rkTick=setInterval(upd,1000);
+    refreshRkOut();rkOutTick=setInterval(refreshRkOut,3000);
+    return;
+  }
+  b0.disabled=false;b1.disabled=false;
+  if(d.state==='done'){
+    const pass=d.result==='PASS';
+    s.className=(d.error?'bad':(pass?'ok':'bad'));
+    s.textContent=(d.error?('ошибка: '+d.error):(d.result+' · '+(d.summary||[]).filter(x=>x.indexOf('RESULT')<0&&x.indexOf('DURATION')<0).map(x=>x.replace('__SUMMARY_','')).join(' · ')))
+      +(d.ended?' · завершён '+d.ended:'');
+    refreshRkOut();
+  }else{s.className='';s.textContent='';}
+}
+async function startRk(mode){
+  const bak=(document.getElementById('rkbak').value||'').trim();
+  const what=mode==='fresh'
+    ? 'УДАЛИТЬ все файлы данных MongoDB на na-22/23/24\nи собрать новый пустой кластер.\n\nБэкапы и хранилище НЕ трогаются.'
+    : 'УДАЛИТЬ все файлы данных MongoDB на na-22/23/24,\nсобрать новый кластер и восстановить инкрементальный бэкап'
+      +(bak?': '+bak:' (последний в хранилище)')+'.';
+  if(!confirm('ТК-РКВ-007 ('+mode+')\n\n'+what+'\n\nКлик = согласие на удаление данных.'))return;
+  try{
+    const r=await fetch('/api/rk',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({mode:mode,backup:bak})});
+    const d=await r.json();
+    if(!d.ok)banner('✗ ТК-РКВ-007 не запущен: '+d.error,'bad');
+    else banner('ТК-РКВ-007 ('+mode+') запущен — вывод ниже.','info');
+  }catch(e){banner('✗ Ошибка запроса: '+e,'bad');}
+  load();
+}
 render({nodes:NODES.map(n=>({label:n.label,ok:true,
   units:Object.fromEntries(n.units.map(u=>[u,'?']))}))});
 load();
@@ -2359,9 +2514,11 @@ class Handler(BaseHTTPRequestHandler):
                 payload["tests"] = tests_snapshot()
                 payload["dr"] = dr_snapshot()
                 payload["e2e"] = e2e_snapshot()
+                payload["rk"] = rk_snapshot()
                 payload["avail"] = {"tests": os.path.exists(RUNNER),
                                     "dr": os.path.exists(DR_EASY),
-                                    "e2e": os.path.exists(E2E_TEST)}
+                                    "e2e": os.path.exists(E2E_TEST),
+                                    "rk": os.path.exists(RK_TEST)}
                 payload["history"] = history_payload()
                 payload["hist_n"] = len(TESTS_HIST)
                 payload["hist_fail"] = tests_hist_fail_count()
@@ -2375,6 +2532,13 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/e2eout":
             try:
                 with open(E2E_OUT, "r", encoding="utf-8", errors="replace") as f:
+                    lines = f.readlines()
+                self._send(200, "text/plain", "".join(lines[-60:]))
+            except Exception:
+                self._send(200, "text/plain", "")
+        elif self.path == "/api/rkout":
+            try:
+                with open(RK_OUT, "r", encoding="utf-8", errors="replace") as f:
                     lines = f.readlines()
                 self._send(200, "text/plain", "".join(lines[-60:]))
             except Exception:
@@ -2403,7 +2567,7 @@ class Handler(BaseHTTPRequestHandler):
             _deny(self)
             return
         if self.path not in ("/api/svc", "/api/tests", "/api/dr", "/api/ls",
-                             "/api/e2e"):
+                             "/api/e2e", "/api/rk"):
             self._send(404, "text/plain", "not found")
             return
         try:
@@ -2416,6 +2580,8 @@ class Handler(BaseHTTPRequestHandler):
                 res = start_dr(req.get("mode", ""), req.get("backup", ""))
             elif self.path == "/api/e2e":
                 res = start_e2e()
+            elif self.path == "/api/rk":
+                res = start_rk(req.get("mode", ""), req.get("backup", ""))
             elif self.path == "/api/ls":
                 act = req.get("action", "")
                 if act == "stop":
